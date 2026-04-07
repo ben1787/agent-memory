@@ -346,6 +346,93 @@ case "$INSTALL_DIR_ON_PATH" in
         ;;
 esac
 
+# --- Ensure Claude Code subprocess shells can find the binary ----------------
+# Reason: Claude Desktop (the macOS .app) is launched by launchd with a
+# stripped PATH like `/usr/bin:/bin:/usr/sbin:/sbin`. claude-code captures
+# that PATH into a shell snapshot at ~/.claude/shell-snapshots/snapshot-*.sh
+# and sources it on every Bash-tool invocation, so subprocess shells can't
+# see anything under /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, etc.
+# Even moving the binary to /usr/local/bin wouldn't help — that dir isn't on
+# the stripped PATH either.
+#
+# The only mechanism guaranteed-by-design to survive the snapshot is a
+# SessionStart hook that appends to $CLAUDE_ENV_FILE. claude-code sources
+# that file AFTER the snapshot on every Bash call, so it can't be clobbered.
+# See: https://code.claude.com/docs/en/hooks-guide.md
+#
+# We only install this if ~/.claude exists (user is actually a Claude Code
+# user). No-op otherwise.
+install_claude_code_session_hook() {
+    local claude_dir="$HOME/.claude"
+    [ -d "$claude_dir" ] || return 0
+
+    local settings_file="$claude_dir/settings.json"
+    local path_prefix="${INSTALL_DIR}:\$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin"
+    # Marker string embedded in the hook command so re-running the installer
+    # finds and skips the existing entry instead of duplicating it. If we
+    # ever need to rev the hook format, bump this tag.
+    local marker="AGENT_MEMORY_INSTALLER_PATH_HOOK_v1"
+    local hook_command="# ${marker}
+printf 'export PATH=\"%s:\$PATH\"\\n' \"${path_prefix}\" >> \"\$CLAUDE_ENV_FILE\""
+
+    # Prefer python3 (ships with macOS 10.15+, nearly all Linux distros).
+    # Fall back to manual instructions if it's not available — we don't want
+    # to depend on jq, which is not always present.
+    if ! command -v python3 >/dev/null 2>&1; then
+        info "python3 not found — skipping automatic Claude Code hook install"
+        info "  to enable agent-memory in Claude Desktop subprocess shells, add this to ~/.claude/settings.json:"
+        info '  {"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$hook_command"'"}]}]}}'
+        return 0
+    fi
+
+    SETTINGS_FILE="$settings_file" MARKER="$marker" HOOK_COMMAND="$hook_command" python3 <<'PY'
+import json, os, sys
+from pathlib import Path
+
+settings_path = Path(os.environ["SETTINGS_FILE"])
+marker = os.environ["MARKER"]
+hook_command = os.environ["HOOK_COMMAND"]
+
+if settings_path.exists():
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"  warning: {settings_path} is not valid JSON ({exc}); leaving it alone", file=sys.stderr)
+        sys.exit(0)
+else:
+    data = {}
+
+hooks = data.setdefault("hooks", {})
+session_start = hooks.setdefault("SessionStart", [])
+
+# Idempotency: if any existing SessionStart hook already contains our marker,
+# we're done. This lets users re-run the installer freely.
+for group in session_start:
+    for entry in group.get("hooks", []) if isinstance(group, dict) else []:
+        if isinstance(entry, dict) and marker in str(entry.get("command", "")):
+            print(f"  Claude Code SessionStart hook already installed in {settings_path}")
+            sys.exit(0)
+
+session_start.append({
+    "hooks": [
+        {
+            "type": "command",
+            "command": hook_command,
+        }
+    ]
+})
+
+# Write atomically: write to a tempfile alongside, then rename, so a crash
+# mid-write never leaves the user with a broken settings.json.
+tmp = settings_path.with_suffix(settings_path.suffix + ".agent-memory.tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+tmp.replace(settings_path)
+print(f"  added SessionStart PATH hook to {settings_path}")
+PY
+}
+
+install_claude_code_session_hook
+
 # --- Verify the install -------------------------------------------------------
 if "${INSTALL_DIR}/agent-memory" --version >/dev/null 2>&1; then
     green "verified: $("${INSTALL_DIR}/agent-memory" --version)"
