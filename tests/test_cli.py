@@ -1,0 +1,489 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from agent_memory.cli import _codex_feature_state, _doctor_payload, app
+from agent_memory.config import MemoryConfig, init_project
+from agent_memory.engine import open_memory_with_retry
+from agent_memory.integration import IntegrationResult
+
+
+def test_codex_feature_state_parses_false(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("agent_memory.cli.shutil.which", lambda name: "/usr/local/bin/codex" if name == "codex" else None)
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout="codex_hooks                      under development  false\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("agent_memory.cli.subprocess.run", fake_run)
+
+    state, error = _codex_feature_state(tmp_path)
+
+    assert state is False
+    assert error is None
+
+
+def test_doctor_payload_reports_codex_exec_warning(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".agent-memory").mkdir()
+    (tmp_path / ".agent-memory" / "config.json").write_text("{}\n")
+    (tmp_path / ".agent-memory" / "instructions.md").write_text("instructions\n")
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        '[features]\n'
+        'codex_hooks = true\n\n'
+        '[mcp_servers."agent-memory"]\n'
+        'command = "/usr/bin/python3"\n'
+        'args = ["-m", "agent_memory.cli", "serve-mcp", "--cwd", "/tmp/repo"]\n'
+    )
+    (tmp_path / ".codex" / "hooks.json").write_text('{"hooks": {}}\n')
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.local.json").write_text('{"hooks": {}}\n')
+    (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}\n')
+
+    def fake_which(name: str) -> str | None:
+        if name == "codex":
+            return "/Applications/Codex.app/Contents/Resources/codex"
+        if name == "agent-memory":
+            return "/Users/test/.local/bin/agent-memory"
+        return None
+
+    monkeypatch.setattr("agent_memory.cli.shutil.which", fake_which)
+    monkeypatch.setattr("agent_memory.cli._codex_feature_state", lambda root: (False, None))
+    monkeypatch.setattr("agent_memory.cli.codex_project_trust_state", lambda root: (False, None))
+
+    payload = _doctor_payload(tmp_path)
+
+    assert payload["project_root"] == str(tmp_path.resolve())
+    assert payload["codex_hooks_effective"] is False
+    assert payload["codex_mcp_server"] is True
+    assert payload["codex_project_trusted"] is False
+    warnings = payload["warnings"]
+    assert isinstance(warnings, list)
+    assert any("fresh interactive Codex session" in warning for warning in warnings)
+    assert any("codex exec" in warning for warning in warnings)
+    assert any("codex_hooks" in warning for warning in warnings)
+    assert any("trusted in `~/.codex/config.toml`" in warning for warning in warnings)
+
+
+def test_doctor_payload_warns_when_codex_not_on_path(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".agent-memory").mkdir()
+    (tmp_path / ".agent-memory" / "config.json").write_text("{}\n")
+    (tmp_path / ".agent-memory" / "instructions.md").write_text("instructions\n")
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('[features]\ncodex_hooks = true\n')
+    (tmp_path / ".codex" / "hooks.json").write_text('{"hooks": {}}\n')
+
+    monkeypatch.setattr("agent_memory.cli.shutil.which", lambda name: "/Users/test/.local/bin/agent-memory" if name == "agent-memory" else None)
+    monkeypatch.setattr("agent_memory.cli.codex_project_trust_state", lambda root: (False, None))
+
+    payload = _doctor_payload(tmp_path)
+
+    assert payload["codex_hooks_effective"] is None
+    warnings = payload["warnings"]
+    assert isinstance(warnings, list)
+    assert any("Codex CLI not found on PATH" in warning for warning in warnings)
+
+
+def test_init_reports_codex_trust_install(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    seen: dict[str, Path] = {}
+
+    def fake_install_codex_project_trust(project_root: Path) -> IntegrationResult:
+        seen["project_root"] = project_root
+        return IntegrationResult(
+            path=Path("/tmp/fake-codex-config.toml"),
+            status="created",
+            details="Installed trust entry.",
+        )
+
+    monkeypatch.setattr("agent_memory.cli.install_codex_project_trust", fake_install_codex_project_trust)
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            str(tmp_path),
+            "--embedding-backend",
+            "hash",
+            "--without-mcp",
+            "--no-install-local-excludes",
+            "--no-install-claude-hooks",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen["project_root"] == tmp_path.resolve()
+    assert "Codex trust: Installed trust entry." in result.stdout
+
+
+def test_uninstall_keeps_store_by_default(tmp_path: Path) -> None:
+    runner = CliRunner()
+    (tmp_path / ".git").mkdir()
+
+    init_result = runner.invoke(
+        app,
+        [
+            "init",
+            str(tmp_path),
+            "--embedding-backend",
+            "hash",
+            "--no-install-codex-trust",
+        ],
+    )
+    assert init_result.exit_code == 0
+
+    uninstall_result = runner.invoke(
+        app,
+        [
+            "uninstall",
+            str(tmp_path),
+            "--keep-codex-trust",
+        ],
+    )
+
+    assert uninstall_result.exit_code == 0
+    assert (tmp_path / ".agent-memory").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / ".codex" / "hooks.json").exists()
+    assert not (tmp_path / ".codex" / "config.toml").exists()
+    assert not (tmp_path / ".claude" / "settings.local.json").exists()
+    exclude_text = (tmp_path / ".git" / "info" / "exclude").read_text()
+    assert ".agent-memory/" in exclude_text
+    assert ".mcp.json" not in exclude_text
+
+
+def test_uninstall_remove_store_deletes_project_memory_data(tmp_path: Path) -> None:
+    runner = CliRunner()
+    (tmp_path / ".git").mkdir()
+
+    init_result = runner.invoke(
+        app,
+        [
+            "init",
+            str(tmp_path),
+            "--embedding-backend",
+            "hash",
+            "--no-install-codex-trust",
+        ],
+    )
+    assert init_result.exit_code == 0
+
+    uninstall_result = runner.invoke(
+        app,
+        [
+            "uninstall",
+            str(tmp_path),
+            "--remove-store",
+            "--keep-codex-trust",
+            "--json",
+        ],
+    )
+
+    assert uninstall_result.exit_code == 0
+    payload = json.loads(uninstall_result.stdout)
+    assert payload["remove_store"] is True
+    assert payload["store"]["status"] == "removed"
+    assert not (tmp_path / ".agent-memory").exists()
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".claude").exists()
+    exclude_text = (tmp_path / ".git" / "info" / "exclude").read_text()
+    assert ".agent-memory/" not in exclude_text
+
+
+def test_save_command_persists_memory(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["save", "--cwd", str(tmp_path), "--json", "CLI save works"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["total_memories"] == 1
+    memory = open_memory_with_retry(tmp_path, exact=True, read_only=True)
+    try:
+        recall = memory.recall("CLI save works", limit=5).to_dict()
+    finally:
+        memory.close()
+    assert recall["hits"][0]["text"] == "CLI save works"
+
+
+def test_save_command_reads_stdin(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+    body = 'multi-line memory\nwith "quotes" and `backticks`\nand a $literal'
+
+    result = runner.invoke(
+        app,
+        ["save", "--cwd", str(tmp_path), "--json", "--stdin"],
+        input=body,
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["total_memories"] == 1
+    memory = open_memory_with_retry(tmp_path, exact=True, read_only=True)
+    try:
+        recall = memory.recall("multi-line memory quotes backticks", limit=5).to_dict()
+    finally:
+        memory.close()
+    assert any(body == h["text"] for h in recall["hits"])
+
+
+def test_save_command_stdin_rejects_combined_args(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["save", "--cwd", str(tmp_path), "--stdin", "extra"],
+        input="body",
+    )
+
+    assert result.exit_code != 0
+    assert "stdin" in result.stdout.lower() or "stdin" in (result.stderr or "").lower()
+
+
+def test_save_command_requires_text_or_stdin(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["save", "--cwd", str(tmp_path)])
+
+    assert result.exit_code != 0
+
+
+def test_list_command_returns_recent_memories_newest_first(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        memory.save("first memory")
+        memory.save("second memory")
+        memory.save("third memory")
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["list", "--cwd", str(tmp_path), "--recent", "2", "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["total_memories"] == 3
+    assert payload["shown"] == 2
+    texts = [m["text"] for m in payload["memories"]]
+    assert texts[0] == "third memory"
+    assert texts[1] == "second memory"
+
+
+def test_show_command_returns_full_memory(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save("a memory worth showing")
+        mem_id = result.saved[0].memory_id
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    show = runner.invoke(app, ["show", mem_id, "--cwd", str(tmp_path), "--json"])
+
+    assert show.exit_code == 0
+    payload = json.loads(show.stdout)
+    assert payload["memory_id"] == mem_id
+    assert payload["text"] == "a memory worth showing"
+
+
+def test_show_command_missing_id_exits_nonzero(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+    result = runner.invoke(app, ["show", "mem_does_not_exist", "--cwd", str(tmp_path)])
+    assert result.exit_code != 0
+
+
+def test_edit_command_one_shot_updates_text(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save("original text")
+        mem_id = result.saved[0].memory_id
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    edit = runner.invoke(
+        app,
+        ["edit", mem_id, "corrected text", "--cwd", str(tmp_path), "--json"],
+    )
+
+    assert edit.exit_code == 0, edit.stdout
+    payload = json.loads(edit.stdout)
+    assert payload["text"] == "corrected text"
+
+
+def test_edit_command_stdin_handles_special_chars(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save("placeholder")
+        mem_id = result.saved[0].memory_id
+    finally:
+        memory.close()
+
+    body = 'multi-line edit\nwith "quotes" and `backticks`\nand a $literal'
+    runner = CliRunner()
+    edit = runner.invoke(
+        app,
+        ["edit", mem_id, "--stdin", "--cwd", str(tmp_path), "--json"],
+        input=body,
+    )
+
+    assert edit.exit_code == 0, edit.stdout
+    payload = json.loads(edit.stdout)
+    assert payload["text"] == body
+
+
+def test_edit_command_stdin_rejects_combined_text(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save("placeholder")
+        mem_id = result.saved[0].memory_id
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    edit = runner.invoke(
+        app,
+        ["edit", mem_id, "extra", "--stdin", "--cwd", str(tmp_path)],
+        input="body",
+    )
+    assert edit.exit_code != 0
+
+
+def test_delete_command_removes_memory(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save("doomed memory")
+        mem_id = result.saved[0].memory_id
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    delete = runner.invoke(
+        app,
+        ["delete", mem_id, "--yes", "--cwd", str(tmp_path), "--json"],
+    )
+
+    assert delete.exit_code == 0, delete.stdout
+    payload = json.loads(delete.stdout)
+    assert payload["deleted"]["memory_id"] == mem_id
+    assert payload["total_memories"] == 0
+
+
+def test_delete_command_requires_yes_for_nonzero_confirmation(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save("careful memory")
+        mem_id = result.saved[0].memory_id
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    # Without --yes and answering "n" to the prompt, should abort.
+    delete = runner.invoke(
+        app,
+        ["delete", mem_id, "--cwd", str(tmp_path)],
+        input="n\n",
+    )
+    assert delete.exit_code != 0
+    # Memory should still be there.
+    memory = open_memory_with_retry(tmp_path, exact=True, read_only=True)
+    try:
+        assert memory.get(mem_id) is not None
+    finally:
+        memory.close()
+
+
+def test_undo_command_reverts_save(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save("an undoable save")
+        mem_id = result.saved[0].memory_id
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    undo = runner.invoke(app, ["undo", "--cwd", str(tmp_path), "--json"])
+
+    assert undo.exit_code == 0, undo.stdout
+    payload = json.loads(undo.stdout)
+    assert payload["reverted"] == "save"
+    assert payload["memory_id"] == mem_id
+    assert payload["total_memories"] == 0
+
+
+def test_undo_command_reverts_delete(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save("about to be killed")
+        mem_id = result.saved[0].memory_id
+        memory.delete(mem_id)
+        assert memory.get(mem_id) is None
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    undo = runner.invoke(app, ["undo", "--cwd", str(tmp_path), "--json"])
+
+    assert undo.exit_code == 0, undo.stdout
+    payload = json.loads(undo.stdout)
+    assert payload["reverted"] == "delete"
+    assert payload["memory_id"] == mem_id
+
+    memory = open_memory_with_retry(tmp_path, exact=True, read_only=True)
+    try:
+        restored = memory.get(mem_id)
+        assert restored is not None
+        assert restored.text == "about to be killed"
+    finally:
+        memory.close()
+
+
+def test_undo_command_with_empty_log_exits_nonzero(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+    undo = runner.invoke(app, ["undo", "--cwd", str(tmp_path)])
+    assert undo.exit_code != 0
+
+
+def test_recall_command_accepts_unquoted_multi_word_query(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        memory.save("The billing webhook handler lives in services/billing/webhooks.py.")
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["recall", "--cwd", str(tmp_path), "--json", "billing", "webhook", "handler"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["hits"][0]["text"] == "The billing webhook handler lives in services/billing/webhooks.py."

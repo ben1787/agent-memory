@@ -1,0 +1,33 @@
+[project]
+name = "agent-memory"
+version = "0.1.0"
+description = "Local-first associative memory graph for agents, CLIs, and MCP clients"
+readme = "README.md"
+authors = [
+    { name = "Ben", email = "ben@equitydatascience.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastembed>=0.7.4",
+    "kuzu>=0.11.3",
+    "mcp>=1.22.0",
+    "numpy>=2.0.2",
+    "typer>=0.23.2",
+]
+
+[project.scripts]
+agent-memory = "agent_memory.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.28,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "openai-agents>=0.13.5",
+    "pytest>=9.0.2",
+    "sentencepiece>=0.2.1",
+    "tiktoken>=0.12.0",
+    "torch>=2.7.1",
+    "transformers>=4.53.0",
+]
