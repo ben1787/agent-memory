@@ -98,6 +98,24 @@ agent-memory undo                           # reverse the most recent save / edi
 """
 
 
+def _toml_literal(value: str) -> str:
+    """Render a string as a TOML literal string (single-quoted, no escapes).
+
+    TOML basic strings (double-quoted) interpret backslash escapes, so a Windows
+    path like ``C:\\Users\\...`` would be parsed as ``\\U`` (a unicode escape) and
+    fail to load. Literal strings have no escapes at all, which is exactly what
+    we want for filesystem paths.
+
+    Reason: Windows paths contain backslashes which break TOML basic strings.
+    """
+    if "'" not in value:
+        return f"'{value}'"
+    # Defensive fallback: a single quote inside a filesystem path is rare on
+    # every platform. Multi-line literal strings ('''...''') cannot contain
+    # three consecutive single quotes; only truly pathological paths reach here.
+    return f"'''{value}'''"
+
+
 @dataclass(slots=True)
 class IntegrationResult:
     path: Path
@@ -150,24 +168,35 @@ def _codex_server_payload(project_root: Path) -> dict[str, object]:
 
 def _render_codex_mcp_server_block(project_root: Path, server_name: str = DEFAULT_SERVER_NAME) -> str:
     payload = _codex_server_payload(project_root)
+    # Reason: paths (command/args/cwd/env values) must render as TOML literal
+    # strings on Windows; basic strings would interpret backslashes as escapes.
     lines = [
         f'[mcp_servers."{server_name}"]',
-        f'command = {json.dumps(payload["command"])}',
+        f"command = {_toml_literal(str(payload['command']))}",
         "args = [",
     ]
     for arg in payload["args"]:
-        lines.append(f"  {json.dumps(arg)},")
+        lines.append(f"  {_toml_literal(str(arg))},")
     lines.extend(
         [
             "]",
-            f'cwd = {json.dumps(payload["cwd"])}',
+            f"cwd = {_toml_literal(str(payload['cwd']))}",
             "",
             f'[mcp_servers."{server_name}".env]',
         ]
     )
     for key, value in payload["env"].items():
-        lines.append(f"{key} = {json.dumps(value)}")
+        lines.append(f"{key} = {_toml_literal(str(value))}")
     return "\n".join(lines) + "\n"
+
+
+def _codex_project_trust_header(project_root: Path) -> str:
+    """Render the [projects.<path>] header using a TOML literal-string key.
+
+    Reason: same rationale as _render_codex_mcp_server_block — TOML basic
+    strings break on Windows backslashes.
+    """
+    return f"[projects.{_toml_literal(str(project_root))}]"
 
 
 def _render_codex_project_trust_block(
@@ -176,7 +205,7 @@ def _render_codex_project_trust_block(
     trust_level: str = DEFAULT_CODEX_TRUST_LEVEL,
 ) -> str:
     return (
-        f'[projects.{json.dumps(str(project_root))}]\n'
+        f"{_codex_project_trust_header(project_root)}\n"
         f'trust_level = {json.dumps(trust_level)}\n'
     )
 
@@ -224,7 +253,9 @@ def _set_codex_project_trust_cannot_fail(
     *,
     trust_level: str = DEFAULT_CODEX_TRUST_LEVEL,
 ) -> str:
-    target_header = f'[projects.{json.dumps(str(project_root))}]'
+    # Reason: the target header must match the TOML-literal-string format we
+    # render with, so existing-block detection works on Windows paths.
+    target_header = _codex_project_trust_header(project_root)
     rendered_line = f'trust_level = {json.dumps(trust_level)}'
     lines = existing_text.splitlines()
     output: list[str] = []
@@ -334,7 +365,7 @@ def _resolve_git_dir(project_root: Path) -> Path | None:
     if git_path.is_dir():
         return git_path
     if git_path.is_file():
-        content = git_path.read_text().strip()
+        content = git_path.read_text(encoding='utf-8').strip()
         prefix = "gitdir: "
         if content.startswith(prefix):
             resolved = (project_root / content[len(prefix) :]).resolve()
@@ -345,7 +376,7 @@ def _resolve_git_dir(project_root: Path) -> Path | None:
 def install_mcp_server(project_root: Path, server_name: str = DEFAULT_SERVER_NAME) -> IntegrationResult:
     mcp_path = project_root / MCP_FILENAME
     if mcp_path.exists():
-        payload = json.loads(mcp_path.read_text())
+        payload = json.loads(mcp_path.read_text(encoding='utf-8'))
         if not isinstance(payload, dict):
             raise ValueError(f"Expected {mcp_path} to contain a JSON object")
     else:
@@ -369,7 +400,7 @@ def install_mcp_server(project_root: Path, server_name: str = DEFAULT_SERVER_NAM
 
     status = "created" if server_name not in servers else "updated"
     servers[server_name] = desired
-    mcp_path.write_text(json.dumps(payload, indent=2) + "\n")
+    mcp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
     return IntegrationResult(
         path=mcp_path,
         status=status,
@@ -386,7 +417,7 @@ def uninstall_mcp_server(project_root: Path, server_name: str = DEFAULT_SERVER_N
             details=f"{MCP_FILENAME} does not exist.",
         )
 
-    payload = json.loads(mcp_path.read_text())
+    payload = json.loads(mcp_path.read_text(encoding='utf-8'))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected {mcp_path} to contain a JSON object")
 
@@ -403,7 +434,7 @@ def uninstall_mcp_server(project_root: Path, server_name: str = DEFAULT_SERVER_N
         payload.pop("mcpServers", None)
 
     if payload:
-        mcp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        mcp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
         return IntegrationResult(
             path=mcp_path,
             status="updated",
@@ -426,7 +457,7 @@ def install_codex_mcp_server(project_root: Path, server_name: str = DEFAULT_SERV
     existed = config_path.exists()
 
     if existed:
-        existing_text = config_path.read_text()
+        existing_text = config_path.read_text(encoding='utf-8')
         try:
             payload = tomllib.loads(existing_text)
         except tomllib.TOMLDecodeError as exc:
@@ -447,7 +478,7 @@ def install_codex_mcp_server(project_root: Path, server_name: str = DEFAULT_SERV
         rendered = _render_codex_mcp_server_block(project_root, server_name=server_name)
         status = "created"
 
-    config_path.write_text(rendered)
+    config_path.write_text(rendered, encoding='utf-8')
     return IntegrationResult(
         path=config_path,
         status=status,
@@ -464,7 +495,7 @@ def uninstall_codex_mcp_server(project_root: Path, server_name: str = DEFAULT_SE
             details=".codex/config.toml does not exist.",
         )
 
-    existing_text = config_path.read_text()
+    existing_text = config_path.read_text(encoding='utf-8')
     payload = tomllib.loads(existing_text)
     mcp_servers = payload.get("mcp_servers")
     if not isinstance(mcp_servers, dict) or server_name not in mcp_servers:
@@ -482,7 +513,7 @@ def uninstall_codex_mcp_server(project_root: Path, server_name: str = DEFAULT_SE
         },
     )
     if rendered:
-        config_path.write_text(rendered)
+        config_path.write_text(rendered, encoding='utf-8')
         return IntegrationResult(
             path=config_path,
             status="updated",
@@ -508,7 +539,7 @@ def codex_project_trust_state(
         return False, None
 
     try:
-        payload = tomllib.loads(config_path.read_text())
+        payload = tomllib.loads(config_path.read_text(encoding='utf-8'))
     except tomllib.TOMLDecodeError as exc:
         return None, f"Failed to parse {config_path}: {exc}"
 
@@ -539,7 +570,7 @@ def install_codex_project_trust(
     config_path = resolved_home / CODEX_CONFIG_FILENAME
 
     if config_path.exists():
-        existing_text = config_path.read_text()
+        existing_text = config_path.read_text(encoding='utf-8')
         trusted, error = codex_project_trust_state(resolved_root, codex_home=resolved_home)
         if error:
             raise ValueError(error)
@@ -562,7 +593,7 @@ def install_codex_project_trust(
         )
         status = "created"
 
-    config_path.write_text(rendered)
+    config_path.write_text(rendered, encoding='utf-8')
     return IntegrationResult(
         path=config_path,
         status=status,
@@ -596,12 +627,12 @@ def uninstall_codex_project_trust(
         )
 
     rendered = _remove_toml_key_in_section_cannot_fail(
-        config_path.read_text(),
-        f'[projects.{json.dumps(str(resolved_root))}]',
+        config_path.read_text(encoding='utf-8'),
+        _codex_project_trust_header(resolved_root),
         "trust_level",
     )
     if rendered:
-        config_path.write_text(rendered)
+        config_path.write_text(rendered, encoding='utf-8')
         return IntegrationResult(
             path=config_path,
             status="updated",
@@ -620,14 +651,14 @@ def ensure_gitignore_entry(project_root: Path, entry: str = GITIGNORE_ENTRY) -> 
     gitignore_path = project_root / GITIGNORE_FILENAME
     normalized_entry = entry.strip()
     if not gitignore_path.exists():
-        gitignore_path.write_text(normalized_entry + "\n")
+        gitignore_path.write_text(normalized_entry + "\n", encoding='utf-8')
         return IntegrationResult(
             path=gitignore_path,
             status="created",
             details=f"Created {GITIGNORE_FILENAME} with {normalized_entry}.",
         )
 
-    existing_lines = gitignore_path.read_text().splitlines()
+    existing_lines = gitignore_path.read_text(encoding='utf-8').splitlines()
     if normalized_entry in existing_lines:
         return IntegrationResult(
             path=gitignore_path,
@@ -635,9 +666,9 @@ def ensure_gitignore_entry(project_root: Path, entry: str = GITIGNORE_ENTRY) -> 
             details=f"{GITIGNORE_FILENAME} already ignores {normalized_entry}.",
         )
 
-    content = gitignore_path.read_text()
+    content = gitignore_path.read_text(encoding='utf-8')
     suffix = "" if content.endswith("\n") or not content else "\n"
-    gitignore_path.write_text(content + suffix + normalized_entry + "\n")
+    gitignore_path.write_text(content + suffix + normalized_entry + "\n", encoding='utf-8')
     return IntegrationResult(
         path=gitignore_path,
         status="updated",
@@ -652,14 +683,14 @@ def ensure_gitignore_entries(
     gitignore_path = project_root / GITIGNORE_FILENAME
     normalized_entries = [entry.strip() for entry in entries if entry.strip()]
     if not gitignore_path.exists():
-        gitignore_path.write_text("\n".join(normalized_entries) + "\n")
+        gitignore_path.write_text("\n".join(normalized_entries) + "\n", encoding='utf-8')
         return IntegrationResult(
             path=gitignore_path,
             status="created",
             details=f"Created {GITIGNORE_FILENAME} with {', '.join(normalized_entries)}.",
         )
 
-    existing_lines = gitignore_path.read_text().splitlines()
+    existing_lines = gitignore_path.read_text(encoding='utf-8').splitlines()
     missing = [entry for entry in normalized_entries if entry not in existing_lines]
     if not missing:
         return IntegrationResult(
@@ -668,9 +699,9 @@ def ensure_gitignore_entries(
             details=f"{GITIGNORE_FILENAME} already ignores {', '.join(normalized_entries)}.",
         )
 
-    content = gitignore_path.read_text()
+    content = gitignore_path.read_text(encoding='utf-8')
     suffix = "" if content.endswith("\n") or not content else "\n"
-    gitignore_path.write_text(content + suffix + "\n".join(missing) + "\n")
+    gitignore_path.write_text(content + suffix + "\n".join(missing) + "\n", encoding='utf-8')
     return IntegrationResult(
         path=gitignore_path,
         status="updated",
@@ -691,9 +722,9 @@ def ensure_local_git_excludes(
     normalized_entries = [entry.strip() for entry in (entries or LOCAL_EXCLUDE_ENTRIES) if entry.strip()]
 
     if not exclude_path.exists():
-        exclude_path.write_text("")
+        exclude_path.write_text("", encoding='utf-8')
 
-    existing_lines = exclude_path.read_text().splitlines()
+    existing_lines = exclude_path.read_text(encoding='utf-8').splitlines()
     missing = [entry for entry in normalized_entries if entry not in existing_lines]
     if not missing:
         return IntegrationResult(
@@ -702,9 +733,9 @@ def ensure_local_git_excludes(
             details=f"Local git exclude already contains {', '.join(normalized_entries)}.",
         )
 
-    content = exclude_path.read_text()
+    content = exclude_path.read_text(encoding='utf-8')
     suffix = "" if content.endswith("\n") or not content else "\n"
-    exclude_path.write_text(content + suffix + "\n".join(missing) + "\n")
+    exclude_path.write_text(content + suffix + "\n".join(missing) + "\n", encoding='utf-8')
     status = "created" if not content else "updated"
     return IntegrationResult(
         path=exclude_path,
@@ -731,7 +762,7 @@ def remove_local_git_excludes(
             details=f"{target_path} does not exist.",
         )
 
-    existing_lines = target_path.read_text().splitlines()
+    existing_lines = target_path.read_text(encoding='utf-8').splitlines()
     kept_lines = [line for line in existing_lines if line.strip() not in normalized_entries]
     removed = [line for line in existing_lines if line.strip() in normalized_entries]
     if not removed:
@@ -741,7 +772,7 @@ def remove_local_git_excludes(
             details=f"{target_path} does not contain {', '.join(normalized_entries)}.",
         )
 
-    target_path.write_text(_render_toml(kept_lines))
+    target_path.write_text(_render_toml(kept_lines), encoding='utf-8')
     return IntegrationResult(
         path=target_path,
         status="updated",
@@ -830,7 +861,7 @@ def install_claude_hooks(
     existed = settings_path.exists()
 
     if existed:
-        payload = json.loads(settings_path.read_text())
+        payload = json.loads(settings_path.read_text(encoding='utf-8'))
         if not isinstance(payload, dict):
             raise ValueError(f"Expected {settings_path} to contain a JSON object")
     else:
@@ -885,7 +916,7 @@ def install_claude_hooks(
             details="Claude local hooks already configured for agent-memory.",
         )
 
-    settings_path.write_text(json.dumps(payload, indent=2) + "\n")
+    settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
     return IntegrationResult(
         path=settings_path,
         status="created" if not existed else "updated",
@@ -913,7 +944,7 @@ def uninstall_claude_hooks(project_root: Path) -> IntegrationResult:
             details=".claude/settings.local.json does not exist.",
         )
 
-    payload = json.loads(settings_path.read_text())
+    payload = json.loads(settings_path.read_text(encoding='utf-8'))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected {settings_path} to contain a JSON object")
 
@@ -954,7 +985,7 @@ def uninstall_claude_hooks(project_root: Path) -> IntegrationResult:
         )
 
     if payload:
-        settings_path.write_text(json.dumps(payload, indent=2) + "\n")
+        settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
         return IntegrationResult(
             path=settings_path,
             status="updated",
@@ -1082,7 +1113,7 @@ def install_codex_feature_flag(project_root: Path) -> IntegrationResult:
     existed = config_path.exists()
 
     if existed:
-        existing_text = config_path.read_text()
+        existing_text = config_path.read_text(encoding='utf-8')
         payload = tomllib.loads(existing_text)
         features = payload.get("features")
         if isinstance(features, dict) and features.get("codex_hooks") is True:
@@ -1097,7 +1128,7 @@ def install_codex_feature_flag(project_root: Path) -> IntegrationResult:
         rendered = "[features]\ncodex_hooks = true\n"
         status = "created"
 
-    config_path.write_text(rendered)
+    config_path.write_text(rendered, encoding='utf-8')
     return IntegrationResult(
         path=config_path,
         status=status,
@@ -1114,7 +1145,7 @@ def uninstall_codex_feature_flag(project_root: Path) -> IntegrationResult:
             details=".codex/config.toml does not exist.",
         )
 
-    existing_text = config_path.read_text()
+    existing_text = config_path.read_text(encoding='utf-8')
     payload = tomllib.loads(existing_text)
     features = payload.get("features")
     if not isinstance(features, dict) or "codex_hooks" not in features:
@@ -1126,7 +1157,7 @@ def uninstall_codex_feature_flag(project_root: Path) -> IntegrationResult:
 
     hooks_path = project_root / ".codex" / CODEX_HOOKS_FILENAME
     if hooks_path.exists():
-        hooks_payload = json.loads(hooks_path.read_text())
+        hooks_payload = json.loads(hooks_path.read_text(encoding='utf-8'))
         hooks = hooks_payload.get("hooks")
         if isinstance(hooks, dict) and any(groups for groups in hooks.values()):
             return IntegrationResult(
@@ -1137,7 +1168,7 @@ def uninstall_codex_feature_flag(project_root: Path) -> IntegrationResult:
 
     rendered = _remove_toml_key_in_section_cannot_fail(existing_text, "[features]", "codex_hooks")
     if rendered:
-        config_path.write_text(rendered)
+        config_path.write_text(rendered, encoding='utf-8')
         return IntegrationResult(
             path=config_path,
             status="updated",
@@ -1159,7 +1190,7 @@ def install_codex_hooks(project_root: Path) -> IntegrationResult:
     existed = hooks_path.exists()
 
     if existed:
-        payload = json.loads(hooks_path.read_text())
+        payload = json.loads(hooks_path.read_text(encoding='utf-8'))
         if not isinstance(payload, dict):
             raise ValueError(f"Expected {hooks_path} to contain a JSON object")
     else:
@@ -1199,7 +1230,7 @@ def install_codex_hooks(project_root: Path) -> IntegrationResult:
             details="Codex repo-local hooks already configured for agent-memory.",
         )
 
-    hooks_path.write_text(json.dumps(payload, indent=2) + "\n")
+    hooks_path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
     return IntegrationResult(
         path=hooks_path,
         status="created" if not existed else "updated",
@@ -1216,7 +1247,7 @@ def uninstall_codex_hooks(project_root: Path) -> IntegrationResult:
             details=".codex/hooks.json does not exist.",
         )
 
-    payload = json.loads(hooks_path.read_text())
+    payload = json.loads(hooks_path.read_text(encoding='utf-8'))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected {hooks_path} to contain a JSON object")
 
@@ -1248,7 +1279,7 @@ def uninstall_codex_hooks(project_root: Path) -> IntegrationResult:
         )
 
     if payload:
-        hooks_path.write_text(json.dumps(payload, indent=2) + "\n")
+        hooks_path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
         return IntegrationResult(
             path=hooks_path,
             status="updated",
@@ -1334,7 +1365,7 @@ def install_memory_instructions(project_root: Path) -> list[IntegrationResult]:
                 )
             )
             continue
-        existing = path.read_text()
+        existing = path.read_text(encoding='utf-8')
         new_text, changed = _inject_instructions_block(existing)
         if not changed:
             results.append(
@@ -1345,7 +1376,7 @@ def install_memory_instructions(project_root: Path) -> list[IntegrationResult]:
                 )
             )
             continue
-        path.write_text(new_text)
+        path.write_text(new_text, encoding='utf-8')
         had_marker_before = INSTRUCTIONS_BEGIN_MARKER in existing
         results.append(
             IntegrationResult(
@@ -1370,7 +1401,7 @@ def uninstall_memory_instructions(project_root: Path) -> list[IntegrationResult]
                 )
             )
             continue
-        existing = path.read_text()
+        existing = path.read_text(encoding='utf-8')
         new_text, changed = _strip_instructions_block(existing)
         if not changed:
             results.append(
@@ -1381,7 +1412,7 @@ def uninstall_memory_instructions(project_root: Path) -> list[IntegrationResult]
                 )
             )
             continue
-        path.write_text(new_text)
+        path.write_text(new_text, encoding='utf-8')
         results.append(
             IntegrationResult(
                 path=path,

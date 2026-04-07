@@ -126,7 +126,7 @@ def load_project(start: Path | None = None, exact: bool = False) -> ProjectConte
     config_path = app_dir / CONFIG_FILENAME
     if not config_path.exists():
         raise ConfigError(f"Missing config file at {config_path}")
-    config = MemoryConfig.from_dict(json.loads(config_path.read_text()))
+    config = MemoryConfig.from_dict(json.loads(config_path.read_text(encoding='utf-8')))
     return ProjectContext(
         root=root,
         app_dir=app_dir,
@@ -272,9 +272,9 @@ def init_project(
             "Use `--force` to overwrite the config."
         )
     resolved_config = config or MemoryConfig()
-    config_path.write_text(json.dumps(resolved_config.to_dict(), indent=2) + "\n")
+    config_path.write_text(json.dumps(resolved_config.to_dict(), indent=2) + "\n", encoding='utf-8')
     if force or not instructions_path.exists():
-        instructions_path.write_text(default_instructions())
+        instructions_path.write_text(default_instructions(), encoding='utf-8')
     return ProjectContext(
         root=resolved_root,
         app_dir=app_dir,

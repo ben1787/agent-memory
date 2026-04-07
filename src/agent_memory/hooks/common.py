@@ -30,7 +30,7 @@ def hook_log_entries(project_root: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     entries: list[dict[str, Any]] = []
-    for raw in path.read_text().splitlines():
+    for raw in path.read_text(encoding='utf-8').splitlines():
         if not raw.strip():
             continue
         try:
@@ -93,7 +93,7 @@ def latest_transcript_turn(transcript_path: Path) -> tuple[str | None, str | Non
     latest_user: tuple[str | None, str | None] = (None, None)
     latest_assistant: tuple[str | None, str | None] = (None, None)
 
-    lines = transcript_path.read_text().splitlines()
+    lines = transcript_path.read_text(encoding='utf-8').splitlines()
     for raw in reversed(lines):
         try:
             record = json.loads(raw)

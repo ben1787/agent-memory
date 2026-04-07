@@ -45,7 +45,7 @@ def write_raw_article_corpus(corpus: dict[str, list[str]], output_dir: Path) -> 
     for title, paragraphs in corpus.items():
         filename = f"{safe_slug(title)}.md"
         article_path = output_dir / filename
-        article_path.write_text(render_article_file(title, paragraphs))
+        article_path.write_text(render_article_file(title, paragraphs), encoding='utf-8')
         article_manifest.append(
             {
                 "title": title,
@@ -54,7 +54,7 @@ def write_raw_article_corpus(corpus: dict[str, list[str]], output_dir: Path) -> 
                 "references": [f"{title} ¶{index}" for index in range(1, len(paragraphs) + 1)],
             }
         )
-    (output_dir / "INDEX.md").write_text(render_index_file(article_manifest))
+    (output_dir / "INDEX.md").write_text(render_index_file(article_manifest), encoding='utf-8')
     return article_manifest
 
 
@@ -70,7 +70,7 @@ def load_raw_article_corpus(raw_articles_dir: Path) -> dict[str, list[str]]:
 
 
 def parse_article_file(article_path: Path) -> tuple[str, list[str]]:
-    text = article_path.read_text()
+    text = article_path.read_text(encoding='utf-8')
     lines = text.splitlines()
     if not lines or not lines[0].startswith("# "):
         raise ValueError(f"Unexpected article file format: {article_path}")

@@ -142,7 +142,7 @@ def check_for_upgrade_in_background(*, repo: str = DEFAULT_REPO) -> str | None:
     cached: dict[str, Any] | None = None
     if cache_path.exists():
         try:
-            cached = json.loads(cache_path.read_text())
+            cached = json.loads(cache_path.read_text(encoding='utf-8'))
         except (OSError, json.JSONDecodeError):
             cached = None
 
@@ -163,7 +163,7 @@ def check_for_upgrade_in_background(*, repo: str = DEFAULT_REPO) -> str | None:
         cache_payload["latest_tag"] = latest.tag
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(cache_payload))
+        cache_path.write_text(json.dumps(cache_payload), encoding='utf-8')
     except OSError:
         pass
 
@@ -234,7 +234,7 @@ def perform_upgrade(*, repo: str = DEFAULT_REPO) -> dict[str, Any]:
                 "details": f"Failed to download {latest.tag}: {exc}",
             }
 
-        expected_sha = sha_file.read_text().split()[0].strip()
+        expected_sha = sha_file.read_text(encoding='utf-8').split()[0].strip()
         actual_sha = _sha256(new_binary)
         if expected_sha.lower() != actual_sha.lower():
             return {
@@ -266,7 +266,7 @@ def perform_upgrade(*, repo: str = DEFAULT_REPO) -> dict[str, Any]:
     try:
         cache_path = _staleness_cache_path()
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps({"checked_at": time.time(), "latest_tag": latest.tag}))
+        cache_path.write_text(json.dumps({"checked_at": time.time(), "latest_tag": latest.tag}), encoding='utf-8')
     except OSError:
         pass
 

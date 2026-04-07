@@ -168,7 +168,7 @@ def flatten_paragraphs(corpus: dict[str, list[str]], embedder: Embedder) -> list
 
 
 def load_cached_corpus(cache_file: Path) -> dict[str, list[str]]:
-    return json.loads(cache_file.read_text())
+    return json.loads(cache_file.read_text(encoding='utf-8'))
 
 
 def build_graph_context(

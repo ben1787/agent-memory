@@ -11,6 +11,17 @@ from pathlib import Path
 
 import typer
 
+# Windows defaults the console to cp1252, which crashes on emoji or any non-Latin-1
+# character that may appear in memory text or integration details. Force UTF-8 on
+# both stdout and stderr so the CLI can safely echo arbitrary user content.
+# Reason: prevents UnicodeEncodeError on Windows when the CLI prints unicode.
+if sys.platform.startswith("win"):
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, OSError):
+            pass
+
 from agent_memory.config import ConfigError, MemoryConfig, init_project, is_project_root, load_project
 from agent_memory.engine import AgentMemory, open_memory_with_retry
 from agent_memory.integration import (
@@ -198,7 +209,7 @@ def _codex_config_has_server(project_root: Path, server_name: str = "agent-memor
     if not config_path.exists():
         return False, None
     try:
-        payload = tomllib.loads(config_path.read_text())
+        payload = tomllib.loads(config_path.read_text(encoding='utf-8'))
     except tomllib.TOMLDecodeError as exc:
         return None, f"Failed to parse {config_path}: {exc}"
     mcp_servers = payload.get("mcp_servers")
@@ -1113,7 +1124,7 @@ def instructions(
     ),
 ) -> None:
     project = _load_project(cwd)
-    typer.echo(project.instructions_path.read_text())
+    typer.echo(project.instructions_path.read_text(encoding='utf-8'))
 
 
 @app.command(

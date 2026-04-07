@@ -416,7 +416,7 @@ def run_benchmark_on_corpus(
             "summary": summary,
             "queries": [report.to_dict() for report in case_reports],
         }
-        report_path.write_text(json.dumps(payload, indent=2) + "\n")
+        report_path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
         payload["report_path"] = str(report_path)
         return payload
     finally:

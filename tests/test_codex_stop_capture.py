@@ -44,7 +44,7 @@ def test_codex_stop_capture_persists_latest_turn_from_codex_transcript(tmp_path:
             ]
         )
         + "\n"
-    )
+    , encoding='utf-8')
     payload = {
         "hook_event_name": "Stop",
         "cwd": str(tmp_path),

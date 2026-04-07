@@ -221,7 +221,7 @@ def _session_file_for_session_id(session_id: str, *, timeout_seconds: float) -> 
 
 
 def _read_transcript_summary(session_file: Path) -> TranscriptSummary:
-    return _parse_transcript(session_file.read_text(errors="ignore"))
+    return _parse_transcript(session_file.read_text(errors="ignore", encoding='utf-8'))
 
 
 def _run_checked(

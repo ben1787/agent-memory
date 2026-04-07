@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from agent_memory.cli import app
@@ -77,6 +78,10 @@ def test_hook_subcommand_is_hidden_from_main_help() -> None:
     assert "_hook" not in result.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="Hook command targets POSIX /bin/sh; Windows hooks are dispatched differently.",
+)
 def test_install_claude_hooks_command_runs_under_minimal_path_shell(tmp_path: Path, monkeypatch) -> None:
     """Regression test for the silent-failure bug where the hook command relied
     on `agent-memory` being on PATH but Claude Code's /bin/sh -c subprocess uses
@@ -95,7 +100,7 @@ def test_install_claude_hooks_command_runs_under_minimal_path_shell(tmp_path: Pa
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     install_claude_hooks(tmp_path)
 
-    settings = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+    settings = json.loads((tmp_path / ".claude" / "settings.local.json").read_text(encoding='utf-8'))
     cmd = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     assert "PATH=$HOME/.local/bin:$PATH" in cmd, (
         f"Hook command must prefix PATH so /bin/sh -c can resolve agent-memory. "
@@ -114,7 +119,7 @@ def test_install_claude_hooks_command_runs_under_minimal_path_shell(tmp_path: Pa
         "#!/bin/sh\n"
         "echo HOOK_MARKER args=\"$*\" project=\"$AGENT_MEMORY_PROJECT_ROOT\" 1>&2\n"
         "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"shim ok\"}}'\n"
-    )
+    , encoding='utf-8')
     shim.chmod(0o755)
 
     minimal_env = {

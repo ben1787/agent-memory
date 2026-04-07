@@ -38,7 +38,7 @@ def test_install_mcp_server_creates_entry(tmp_path: Path) -> None:
     result = install_mcp_server(tmp_path)
 
     assert result.status == "created"
-    payload = json.loads((tmp_path / ".mcp.json").read_text())
+    payload = json.loads((tmp_path / ".mcp.json").read_text(encoding='utf-8'))
     server = payload["mcpServers"]["agent-memory"]
     assert server["type"] == "stdio"
     assert server["args"][-2:] == ["--cwd", str(tmp_path.resolve())]
@@ -61,11 +61,11 @@ def test_install_mcp_server_preserves_existing_servers(tmp_path: Path) -> None:
             indent=2,
         )
         + "\n"
-    )
+    , encoding='utf-8')
 
     install_mcp_server(tmp_path)
 
-    payload = json.loads(mcp_path.read_text())
+    payload = json.loads(mcp_path.read_text(encoding='utf-8'))
     assert "context7" in payload["mcpServers"]
     assert "agent-memory" in payload["mcpServers"]
 
@@ -83,12 +83,12 @@ def test_uninstall_mcp_server_removes_only_agent_memory_entry(tmp_path: Path) ->
             indent=2,
         )
         + "\n"
-    )
+    , encoding='utf-8')
 
     result = uninstall_mcp_server(tmp_path)
 
     assert result.status == "updated"
-    payload = json.loads(mcp_path.read_text())
+    payload = json.loads(mcp_path.read_text(encoding='utf-8'))
     assert "context7" in payload["mcpServers"]
     assert "agent-memory" not in payload["mcpServers"]
 
@@ -100,7 +100,7 @@ def test_ensure_local_git_excludes_creates_and_dedupes(tmp_path: Path) -> None:
 
     assert first.status in {"created", "updated"}
     assert second.status == "unchanged"
-    content = (tmp_path / ".git" / "info" / "exclude").read_text()
+    content = (tmp_path / ".git" / "info" / "exclude").read_text(encoding='utf-8')
     assert ".agent-memory/" in content
     assert ".claude/settings.local.json" in content
     assert ".codex/config.toml" in content
@@ -111,19 +111,19 @@ def test_ensure_local_git_excludes_creates_and_dedupes(tmp_path: Path) -> None:
 def test_remove_local_git_excludes_removes_only_requested_entries(tmp_path: Path) -> None:
     exclude_path = tmp_path / ".git" / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True)
-    exclude_path.write_text(".agent-memory/\n.mcp.json\nother-local-file\n")
+    exclude_path.write_text(".agent-memory/\n.mcp.json\nother-local-file\n", encoding='utf-8')
 
     result = remove_local_git_excludes(tmp_path, entries=[".agent-memory/", ".mcp.json"])
 
     assert result.status == "updated"
-    assert exclude_path.read_text() == "other-local-file\n"
+    assert exclude_path.read_text(encoding='utf-8') == "other-local-file\n"
 
 
 def test_install_codex_feature_flag_creates_repo_config(tmp_path: Path) -> None:
     result = install_codex_feature_flag(tmp_path)
 
     assert result.status == "created"
-    config = (tmp_path / ".codex" / "config.toml").read_text()
+    config = (tmp_path / ".codex" / "config.toml").read_text(encoding='utf-8')
     assert "[features]" in config
     assert "codex_hooks = true" in config
 
@@ -131,11 +131,11 @@ def test_install_codex_feature_flag_creates_repo_config(tmp_path: Path) -> None:
 def test_install_codex_feature_flag_preserves_existing_config(tmp_path: Path) -> None:
     config_path = tmp_path / ".codex" / "config.toml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text('[sandbox]\nmode = "workspace-write"\n')
+    config_path.write_text('[sandbox]\nmode = "workspace-write"\n', encoding='utf-8')
 
     install_codex_feature_flag(tmp_path)
 
-    content = config_path.read_text()
+    content = config_path.read_text(encoding='utf-8')
     assert '[sandbox]' in content
     assert 'mode = "workspace-write"' in content
     assert '[features]' in content
@@ -146,7 +146,7 @@ def test_install_codex_mcp_server_creates_repo_config(tmp_path: Path) -> None:
     result = install_codex_mcp_server(tmp_path)
 
     assert result.status == "created"
-    config = (tmp_path / ".codex" / "config.toml").read_text()
+    config = (tmp_path / ".codex" / "config.toml").read_text(encoding='utf-8')
     assert '[mcp_servers."agent-memory"]' in config
     assert '--cwd' in config
     assert str(tmp_path.resolve()) in config
@@ -155,11 +155,11 @@ def test_install_codex_mcp_server_creates_repo_config(tmp_path: Path) -> None:
 def test_install_codex_mcp_server_preserves_existing_config(tmp_path: Path) -> None:
     config_path = tmp_path / ".codex" / "config.toml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text('[sandbox]\nmode = "workspace-write"\n')
+    config_path.write_text('[sandbox]\nmode = "workspace-write"\n', encoding='utf-8')
 
     install_codex_mcp_server(tmp_path)
 
-    content = config_path.read_text()
+    content = config_path.read_text(encoding='utf-8')
     assert '[sandbox]' in content
     assert 'mode = "workspace-write"' in content
     assert '[mcp_servers."agent-memory"]' in content
@@ -179,12 +179,12 @@ def test_uninstall_codex_mcp_server_preserves_other_config(tmp_path: Path) -> No
         'AGENT_MEMORY_PROJECT_ROOT = "/tmp/repo"\n\n'
         '[mcp_servers."context7"]\n'
         'command = "npx"\n'
-    )
+    , encoding='utf-8')
 
     result = uninstall_codex_mcp_server(tmp_path)
 
     assert result.status == "updated"
-    content = config_path.read_text()
+    content = config_path.read_text(encoding='utf-8')
     assert '[features]' in content
     assert '[mcp_servers."context7"]' in content
     assert '[mcp_servers."agent-memory"]' not in content
@@ -198,8 +198,10 @@ def test_install_codex_project_trust_creates_global_config(tmp_path: Path) -> No
     result = install_codex_project_trust(project_root, codex_home=codex_home)
 
     assert result.status == "created"
-    config = (codex_home / "config.toml").read_text()
-    assert f'[projects."{project_root.resolve()}"]' in config
+    config = (codex_home / "config.toml").read_text(encoding='utf-8')
+    # Reason: paths render as TOML literal strings (single-quoted) so Windows
+    # backslashes don't break tomllib parsing.
+    assert f"[projects.'{project_root.resolve()}']" in config
     assert 'trust_level = "trusted"' in config
 
 
@@ -209,17 +211,18 @@ def test_install_codex_project_trust_preserves_existing_project_settings(tmp_pat
     codex_home = tmp_path / "codex-home"
     config_path = codex_home / "config.toml"
     codex_home.mkdir()
+    # Reason: literal-string keys so fixture parses on Windows (see above).
     config_path.write_text(
         '[sandbox]\n'
         'mode = "workspace-write"\n\n'
-        f'[projects."{project_root.resolve()}"]\n'
+        f"[projects.'{project_root.resolve()}']\n"
         'approval_policy = "never"\n'
         'trust_level = "untrusted"\n'
-    )
+    , encoding='utf-8')
 
     install_codex_project_trust(project_root, codex_home=codex_home)
 
-    content = config_path.read_text()
+    content = config_path.read_text(encoding='utf-8')
     assert '[sandbox]' in content
     assert 'mode = "workspace-write"' in content
     assert 'approval_policy = "never"' in content
@@ -232,16 +235,17 @@ def test_uninstall_codex_project_trust_preserves_other_project_settings(tmp_path
     codex_home = tmp_path / "codex-home"
     config_path = codex_home / "config.toml"
     codex_home.mkdir()
+    # Reason: literal-string keys so fixture parses on Windows (see above).
     config_path.write_text(
-        f'[projects."{project_root.resolve()}"]\n'
+        f"[projects.'{project_root.resolve()}']\n"
         'approval_policy = "never"\n'
         'trust_level = "trusted"\n'
-    )
+    , encoding='utf-8')
 
     result = uninstall_codex_project_trust(project_root, codex_home=codex_home)
 
     assert result.status == "updated"
-    content = config_path.read_text()
+    content = config_path.read_text(encoding='utf-8')
     assert 'approval_policy = "never"' in content
     assert 'trust_level = "trusted"' not in content
 
@@ -250,7 +254,7 @@ def test_install_codex_hooks_creates_hooks_json(tmp_path: Path) -> None:
     result = install_codex_hooks(tmp_path)
 
     assert result.status == "created"
-    payload = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+    payload = json.loads((tmp_path / ".codex" / "hooks.json").read_text(encoding='utf-8'))
     assert "UserPromptSubmit" in payload["hooks"]
     user_prompt_hook = payload["hooks"]["UserPromptSubmit"][0]["hooks"][0]
     # Portable form: dispatches via the on-PATH `agent-memory` binary, no
@@ -281,11 +285,11 @@ def test_install_codex_hooks_preserves_existing_hooks(tmp_path: Path) -> None:
             indent=2,
         )
         + "\n"
-    )
+    , encoding='utf-8')
 
     install_codex_hooks(tmp_path)
 
-    payload = json.loads(hooks_path.read_text())
+    payload = json.loads(hooks_path.read_text(encoding='utf-8'))
     assert "PreToolUse" in payload["hooks"]
     assert "UserPromptSubmit" in payload["hooks"]
 
@@ -315,12 +319,12 @@ def test_uninstall_codex_hooks_preserves_other_hooks(tmp_path: Path) -> None:
             indent=2,
         )
         + "\n"
-    )
+    , encoding='utf-8')
 
     result = uninstall_codex_hooks(tmp_path)
 
     assert result.status == "updated"
-    payload = json.loads(hooks_path.read_text())
+    payload = json.loads(hooks_path.read_text(encoding='utf-8'))
     assert "PreToolUse" in payload["hooks"]
     assert "UserPromptSubmit" not in payload["hooks"]
 
@@ -329,7 +333,7 @@ def test_uninstall_codex_feature_flag_leaves_other_hooked_projects_enabled(tmp_p
     config_path = tmp_path / ".codex" / "config.toml"
     hooks_path = tmp_path / ".codex" / "hooks.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text('[features]\ncodex_hooks = true\n')
+    config_path.write_text('[features]\ncodex_hooks = true\n', encoding='utf-8')
     hooks_path.write_text(
         json.dumps(
             {
@@ -342,19 +346,19 @@ def test_uninstall_codex_feature_flag_leaves_other_hooked_projects_enabled(tmp_p
             indent=2,
         )
         + "\n"
-    )
+    , encoding='utf-8')
 
     result = uninstall_codex_feature_flag(tmp_path)
 
     assert result.status == "unchanged"
-    assert 'codex_hooks = true' in config_path.read_text()
+    assert 'codex_hooks = true' in config_path.read_text(encoding='utf-8')
 
 
 def test_install_claude_hooks_creates_settings(tmp_path: Path) -> None:
     result = install_claude_hooks(tmp_path)
 
     assert result.status == "created"
-    payload = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+    payload = json.loads((tmp_path / ".claude" / "settings.local.json").read_text(encoding='utf-8'))
     # Default install is CLI-only — we must NOT touch enabledMcpjsonServers.
     assert "enabledMcpjsonServers" not in payload
     assert "UserPromptSubmit" in payload["hooks"]
@@ -371,7 +375,7 @@ def test_install_claude_hooks_creates_settings(tmp_path: Path) -> None:
 def test_install_claude_hooks_with_mcp_registers_server(tmp_path: Path) -> None:
     install_claude_hooks(tmp_path, register_mcp_server=True)
 
-    payload = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+    payload = json.loads((tmp_path / ".claude" / "settings.local.json").read_text(encoding='utf-8'))
     assert "agent-memory" in payload["enabledMcpjsonServers"]
     assert "UserPromptSubmit" in payload["hooks"]
 
@@ -388,11 +392,11 @@ def test_install_claude_hooks_preserves_existing_settings(tmp_path: Path) -> Non
             indent=2,
         )
         + "\n"
-    )
+    , encoding='utf-8')
 
     install_claude_hooks(tmp_path)
 
-    payload = json.loads(settings_path.read_text())
+    payload = json.loads(settings_path.read_text(encoding='utf-8'))
     assert payload["permissions"]["allow"] == ["Bash"]
     # Default install does not append agent-memory; the user's existing server list is untouched.
     assert payload["enabledMcpjsonServers"] == ["context7"]
@@ -411,11 +415,11 @@ def test_install_claude_hooks_with_mcp_preserves_existing_settings(tmp_path: Pat
             indent=2,
         )
         + "\n"
-    )
+    , encoding='utf-8')
 
     install_claude_hooks(tmp_path, register_mcp_server=True)
 
-    payload = json.loads(settings_path.read_text())
+    payload = json.loads(settings_path.read_text(encoding='utf-8'))
     assert payload["permissions"]["allow"] == ["Bash"]
     assert "context7" in payload["enabledMcpjsonServers"]
     assert "agent-memory" in payload["enabledMcpjsonServers"]
@@ -433,8 +437,8 @@ def test_install_memory_instructions_skips_when_files_missing(tmp_path: Path) ->
 def test_install_memory_instructions_injects_after_h1(tmp_path: Path) -> None:
     claude_md = tmp_path / "CLAUDE.md"
     agents_md = tmp_path / "AGENTS.md"
-    claude_md.write_text("# Project\n\n## Existing\n\nstuff\n")
-    agents_md.write_text("# Project\n\n## Existing\n\nstuff\n")
+    claude_md.write_text("# Project\n\n## Existing\n\nstuff\n", encoding='utf-8')
+    agents_md.write_text("# Project\n\n## Existing\n\nstuff\n", encoding='utf-8')
 
     results = install_memory_instructions(tmp_path)
 
@@ -442,7 +446,7 @@ def test_install_memory_instructions_injects_after_h1(tmp_path: Path) -> None:
     assert statuses == {"CLAUDE.md": "created", "AGENTS.md": "created"}
 
     for path in (claude_md, agents_md):
-        text = path.read_text()
+        text = path.read_text(encoding='utf-8')
         assert INSTRUCTIONS_BEGIN_MARKER in text
         assert INSTRUCTIONS_END_MARKER in text
         assert "Agent Memory" in text
@@ -462,12 +466,12 @@ def test_install_memory_instructions_injects_after_h1(tmp_path: Path) -> None:
 
 def test_install_memory_instructions_is_idempotent(tmp_path: Path) -> None:
     claude_md = tmp_path / "CLAUDE.md"
-    claude_md.write_text("# Project\n\nfoo\n")
+    claude_md.write_text("# Project\n\nfoo\n", encoding='utf-8')
 
     install_memory_instructions(tmp_path)
-    text_after_first = claude_md.read_text()
+    text_after_first = claude_md.read_text(encoding='utf-8')
     second = install_memory_instructions(tmp_path)
-    text_after_second = claude_md.read_text()
+    text_after_second = claude_md.read_text(encoding='utf-8')
 
     assert text_after_first == text_after_second
     statuses = {r.path.name: r.status for r in second}
@@ -481,11 +485,11 @@ def test_install_memory_instructions_replaces_stale_block(tmp_path: Path) -> Non
     claude_md = tmp_path / "CLAUDE.md"
     claude_md.write_text(
         f"# Project\n\n{INSTRUCTIONS_BEGIN_MARKER}\nold stale text\n{INSTRUCTIONS_END_MARKER}\n\n## After\nbody\n"
-    )
+    , encoding='utf-8')
 
     results = install_memory_instructions(tmp_path)
 
-    text = claude_md.read_text()
+    text = claude_md.read_text(encoding='utf-8')
     assert "old stale text" not in text
     assert "agent-memory recall" in text
     assert "## After" in text
@@ -496,13 +500,13 @@ def test_install_memory_instructions_replaces_stale_block(tmp_path: Path) -> Non
 
 def test_uninstall_memory_instructions_removes_only_marker_block(tmp_path: Path) -> None:
     claude_md = tmp_path / "CLAUDE.md"
-    claude_md.write_text("# Project\n\nfoo\n\n## After\nbody\n")
+    claude_md.write_text("# Project\n\nfoo\n\n## After\nbody\n", encoding='utf-8')
     install_memory_instructions(tmp_path)
-    assert INSTRUCTIONS_BEGIN_MARKER in claude_md.read_text()
+    assert INSTRUCTIONS_BEGIN_MARKER in claude_md.read_text(encoding='utf-8')
 
     uninstall_memory_instructions(tmp_path)
 
-    text = claude_md.read_text()
+    text = claude_md.read_text(encoding='utf-8')
     assert INSTRUCTIONS_BEGIN_MARKER not in text
     assert INSTRUCTIONS_END_MARKER not in text
     assert "# Project" in text
@@ -513,10 +517,10 @@ def test_uninstall_memory_instructions_removes_only_marker_block(tmp_path: Path)
 
 def test_uninstall_memory_instructions_no_op_when_block_absent(tmp_path: Path) -> None:
     claude_md = tmp_path / "CLAUDE.md"
-    claude_md.write_text("# Project\n\nfoo\n")
+    claude_md.write_text("# Project\n\nfoo\n", encoding='utf-8')
 
     results = uninstall_memory_instructions(tmp_path)
 
     statuses = {r.path.name: r.status for r in results}
     assert statuses["CLAUDE.md"] == "unchanged"
-    assert claude_md.read_text() == "# Project\n\nfoo\n"
+    assert claude_md.read_text(encoding='utf-8') == "# Project\n\nfoo\n"

@@ -259,8 +259,13 @@ class AgentMemory:
         """Return the N most-recently-created memories, newest first."""
         if limit <= 0:
             return []
-        ordered = sorted(self._memories, key=lambda m: m.created_at, reverse=True)
-        return ordered[:limit]
+        # Reason: on Windows, datetime.now() has ~16 ms resolution, so two
+        # saves in quick succession can produce identical created_at strings.
+        # Break ties by insertion order (index in self._memories) so the
+        # "newest first" contract holds reliably on every platform.
+        indexed = list(enumerate(self._memories))
+        indexed.sort(key=lambda pair: (pair[1].created_at, pair[0]), reverse=True)
+        return [memory for _, memory in indexed[:limit]]
 
     def list_all(self) -> list[MemoryRecord]:
         return list(self._memories)

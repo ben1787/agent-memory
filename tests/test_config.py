@@ -17,7 +17,7 @@ def test_load_project_finds_unique_ancestor(tmp_path: Path) -> None:
 
     assert project.root == project_root.resolve()
     assert project.instructions_path.exists()
-    assert "Agent Memory Instructions" in project.instructions_path.read_text()
+    assert "Agent Memory Instructions" in project.instructions_path.read_text(encoding='utf-8')
 
 
 def test_init_refuses_when_ancestor_already_has_store(tmp_path: Path) -> None:

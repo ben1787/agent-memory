@@ -42,7 +42,7 @@ def test_check_for_upgrade_uses_cache_when_fresh(tmp_path, monkeypatch) -> None:
     # Pretend we checked 1 hour ago and the latest tag was way newer.
     cache_file.write_text(
         json.dumps({"checked_at": time.time() - 3600, "latest_tag": "v999.0.0"})
-    )
+    , encoding='utf-8')
 
     # _resolve_latest_release should NOT be called because the cache is fresh.
     with patch.object(upgrade, "_resolve_latest_release") as resolve_mock:
@@ -60,7 +60,7 @@ def test_check_for_upgrade_returns_none_when_already_latest(tmp_path, monkeypatc
     monkeypatch.setattr(upgrade, "_cache_dir", lambda: cache_dir)
     # Stale cache → fresh fetch.
     cache_file = cache_dir / "update-check.json"
-    cache_file.write_text(json.dumps({"checked_at": 0, "latest_tag": "v0.0.1"}))
+    cache_file.write_text(json.dumps({"checked_at": 0, "latest_tag": "v0.0.1"}), encoding='utf-8')
 
     fake_latest = upgrade.LatestRelease(
         tag=f"v{upgrade.__version__}",
@@ -85,7 +85,7 @@ def test_check_for_upgrade_handles_network_failure_silently(tmp_path, monkeypatc
     # retry on every command.
     cache_file = cache_dir / "update-check.json"
     assert cache_file.exists()
-    payload = json.loads(cache_file.read_text())
+    payload = json.loads(cache_file.read_text(encoding='utf-8'))
     assert "checked_at" in payload
 
 

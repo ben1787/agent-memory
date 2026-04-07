@@ -34,8 +34,8 @@ def test_codex_feature_state_parses_false(monkeypatch, tmp_path: Path) -> None:
 def test_doctor_payload_reports_codex_exec_warning(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
     (tmp_path / ".agent-memory").mkdir()
-    (tmp_path / ".agent-memory" / "config.json").write_text("{}\n")
-    (tmp_path / ".agent-memory" / "instructions.md").write_text("instructions\n")
+    (tmp_path / ".agent-memory" / "config.json").write_text("{}\n", encoding='utf-8')
+    (tmp_path / ".agent-memory" / "instructions.md").write_text("instructions\n", encoding='utf-8')
     (tmp_path / ".codex").mkdir()
     (tmp_path / ".codex" / "config.toml").write_text(
         '[features]\n'
@@ -43,11 +43,11 @@ def test_doctor_payload_reports_codex_exec_warning(monkeypatch, tmp_path: Path) 
         '[mcp_servers."agent-memory"]\n'
         'command = "/usr/bin/python3"\n'
         'args = ["-m", "agent_memory.cli", "serve-mcp", "--cwd", "/tmp/repo"]\n'
-    )
-    (tmp_path / ".codex" / "hooks.json").write_text('{"hooks": {}}\n')
+    , encoding='utf-8')
+    (tmp_path / ".codex" / "hooks.json").write_text('{"hooks": {}}\n', encoding='utf-8')
     (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "settings.local.json").write_text('{"hooks": {}}\n')
-    (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}\n')
+    (tmp_path / ".claude" / "settings.local.json").write_text('{"hooks": {}}\n', encoding='utf-8')
+    (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}\n', encoding='utf-8')
 
     def fake_which(name: str) -> str | None:
         if name == "codex":
@@ -77,11 +77,11 @@ def test_doctor_payload_reports_codex_exec_warning(monkeypatch, tmp_path: Path) 
 def test_doctor_payload_warns_when_codex_not_on_path(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
     (tmp_path / ".agent-memory").mkdir()
-    (tmp_path / ".agent-memory" / "config.json").write_text("{}\n")
-    (tmp_path / ".agent-memory" / "instructions.md").write_text("instructions\n")
+    (tmp_path / ".agent-memory" / "config.json").write_text("{}\n", encoding='utf-8')
+    (tmp_path / ".agent-memory" / "instructions.md").write_text("instructions\n", encoding='utf-8')
     (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex" / "config.toml").write_text('[features]\ncodex_hooks = true\n')
-    (tmp_path / ".codex" / "hooks.json").write_text('{"hooks": {}}\n')
+    (tmp_path / ".codex" / "config.toml").write_text('[features]\ncodex_hooks = true\n', encoding='utf-8')
+    (tmp_path / ".codex" / "hooks.json").write_text('{"hooks": {}}\n', encoding='utf-8')
 
     monkeypatch.setattr("agent_memory.cli.shutil.which", lambda name: "/Users/test/.local/bin/agent-memory" if name == "agent-memory" else None)
     monkeypatch.setattr("agent_memory.cli.codex_project_trust_state", lambda root: (False, None))
@@ -157,7 +157,7 @@ def test_uninstall_keeps_store_by_default(tmp_path: Path) -> None:
     assert not (tmp_path / ".codex" / "hooks.json").exists()
     assert not (tmp_path / ".codex" / "config.toml").exists()
     assert not (tmp_path / ".claude" / "settings.local.json").exists()
-    exclude_text = (tmp_path / ".git" / "info" / "exclude").read_text()
+    exclude_text = (tmp_path / ".git" / "info" / "exclude").read_text(encoding='utf-8')
     assert ".agent-memory/" in exclude_text
     assert ".mcp.json" not in exclude_text
 
@@ -197,7 +197,7 @@ def test_uninstall_remove_store_deletes_project_memory_data(tmp_path: Path) -> N
     assert not (tmp_path / ".mcp.json").exists()
     assert not (tmp_path / ".codex").exists()
     assert not (tmp_path / ".claude").exists()
-    exclude_text = (tmp_path / ".git" / "info" / "exclude").read_text()
+    exclude_text = (tmp_path / ".git" / "info" / "exclude").read_text(encoding='utf-8')
     assert ".agent-memory/" not in exclude_text
 
 
