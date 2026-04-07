@@ -254,9 +254,12 @@ def test_install_codex_hooks_creates_hooks_json(tmp_path: Path) -> None:
     assert "UserPromptSubmit" in payload["hooks"]
     user_prompt_hook = payload["hooks"]["UserPromptSubmit"][0]["hooks"][0]
     # Portable form: dispatches via the on-PATH `agent-memory` binary, no
-    # absolute python interpreter path.
+    # absolute python interpreter path. Also includes a PATH=$HOME/.local/bin
+    # prefix so /bin/sh -c hook subprocesses can find the binary even though
+    # /bin/sh has a stripped-down PATH that does not include ~/.local/bin.
     assert "agent-memory _hook codex-user-prompt-submit" in user_prompt_hook["command"]
     assert "AGENT_MEMORY_PROJECT_ROOT=" in user_prompt_hook["command"]
+    assert "PATH=$HOME/.local/bin:$PATH" in user_prompt_hook["command"]
     assert "/python3" not in user_prompt_hook["command"]
 
 
@@ -357,9 +360,11 @@ def test_install_claude_hooks_creates_settings(tmp_path: Path) -> None:
     assert "UserPromptSubmit" in payload["hooks"]
     user_prompt_hook = payload["hooks"]["UserPromptSubmit"][0]["hooks"][0]
     # Portable form: dispatches via the on-PATH `agent-memory` binary, no
-    # absolute python interpreter path.
+    # absolute python interpreter path. Also includes a PATH=$HOME/.local/bin
+    # prefix so /bin/sh -c hook subprocesses can find the binary.
     assert "agent-memory _hook claude-user-prompt-submit" in user_prompt_hook["command"]
     assert "AGENT_MEMORY_PROJECT_ROOT=" in user_prompt_hook["command"]
+    assert "PATH=$HOME/.local/bin:$PATH" in user_prompt_hook["command"]
     assert "/python3" not in user_prompt_hook["command"]
 
 

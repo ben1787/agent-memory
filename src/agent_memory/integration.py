@@ -752,14 +752,34 @@ def remove_local_git_excludes(
 def _shell_command_for_hook(project_root: Path, hook_name: str) -> str:
     """Build a portable hook command line.
 
-    Emits `AGENT_MEMORY_PROJECT_ROOT=<root> agent-memory _hook <hook-name>` —
-    relies on `agent-memory` being on PATH (true for both the curl-installed
-    binary and `uv tool install` paths). The previous form embedded an
-    absolute path to a specific Python interpreter, which broke the hook on
-    every machine other than the one that ran `init`.
+    Emits:
+        AGENT_MEMORY_PROJECT_ROOT=<root> PATH=$HOME/.local/bin:$PATH agent-memory _hook <hook-name>
+
+    The PATH prefix is critical: Claude Code (and Codex) launch hook commands
+    via `/bin/sh -c "..."`, which uses a stripped-down PATH of
+    `/usr/bin:/bin:/usr/sbin:/sbin` and does NOT source the user's shell rc.
+    Without the prefix, `agent-memory` resolves correctly when you test the
+    command from your interactive shell but fails silently when the real hook
+    fires, because `~/.local/bin` is not on the subshell PATH.
+
+    `$HOME` IS reliably set in the hook subprocess environment, so prepending
+    `$HOME/.local/bin` keeps the command machine-portable (no user-specific
+    absolute path baked in) while ensuring the binary actually resolves on
+    every machine where install.sh dropped it in the default location.
+
+    If a user installed agent-memory somewhere other than `$HOME/.local/bin`
+    (e.g. `/opt/local/bin` via Homebrew, or a custom INSTALL_DIR), they can
+    re-init with `agent-memory init` and the binary will be on PATH for the
+    init process; for the hook command itself, system locations like /usr/local/bin
+    are already on the /bin/sh PATH or covered by Homebrew's path injection.
+
+    The previous form embedded an absolute Python interpreter path, which was
+    machine-specific. The form before that was just `agent-memory _hook ...`
+    with no PATH prefix, which silently failed in real hook subprocesses.
     """
     exports = f"AGENT_MEMORY_PROJECT_ROOT={shlex.quote(str(project_root))}"
-    return f"{exports} agent-memory _hook {hook_name}"
+    path_prefix = "PATH=$HOME/.local/bin:$PATH"
+    return f"{exports} {path_prefix} agent-memory _hook {hook_name}"
 
 
 # Mapping from the new portable hook-name slug to the underlying Python module.
@@ -834,12 +854,18 @@ def install_claude_hooks(
         "command": _shell_command_for_hook(project_root, "claude-user-prompt-submit"),
         "timeout": 10,
     }
-    # Drop legacy hook-command shapes (absolute python -m module path) before re-merging.
+    # Drop ALL prior agent-memory hook command shapes before re-merging the
+    # current desired form. The substring `_hook claude-user-prompt-submit`
+    # matches both broken intermediate forms (no-PATH-prefix) and the current
+    # PATH-prefix form, so the strip+merge pair is idempotent: re-running init
+    # always converges on the same canonical command, no matter what was there
+    # before.
     changed = _remove_hook_commands(
         payload,
         "UserPromptSubmit",
         [
             "agent_memory.hooks.claude_user_prompt_submit",  # legacy: python -m form
+            "_hook claude-user-prompt-submit",  # all portable forms (broken + current)
         ],
     ) or changed
     changed = _merge_hook(payload, "UserPromptSubmit", prompt_hook) or changed
@@ -1145,11 +1171,15 @@ def install_codex_hooks(project_root: Path) -> IntegrationResult:
         "timeout": 10,
         "statusMessage": "Recalling project memory",
     }
-    # Drop legacy hook-command shapes before re-merging.
+    # Drop ALL prior agent-memory hook command shapes before re-merging the
+    # canonical form. See install_claude_hooks for the rationale — same logic.
     changed = _remove_hook_commands(
         payload,
         "UserPromptSubmit",
-        ["agent_memory.hooks.codex_user_prompt_submit"],  # legacy: python -m form
+        [
+            "agent_memory.hooks.codex_user_prompt_submit",  # legacy: python -m form
+            "_hook codex-user-prompt-submit",  # all portable forms (broken + current)
+        ],
     )
     changed = _merge_event_hook(payload, "UserPromptSubmit", prompt_hook) or changed
     changed = _remove_hook_commands(
