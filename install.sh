@@ -18,10 +18,55 @@
 # Environment overrides:
 #   AGENT_MEMORY_VERSION       Tag to install, e.g. v0.2.1. Defaults to latest.
 #   AGENT_MEMORY_INSTALL_DIR   Install directory. Defaults to ~/.local/bin.
+#   AGENT_MEMORY_LIBEXEC_DIR   Bundle extraction root. Defaults to
+#                              ~/.local/share/agent-memory.
 #   AGENT_MEMORY_REPO          GitHub repo path "owner/name". Defaults to the
 #                              canonical project. Override for forks.
+#
+# Flags:
+#   --local-tarball <path>     Install from a local tarball instead of fetching
+#                              from a GitHub release. Skips version resolution
+#                              and checksum verification. Useful for development
+#                              and CI smoke tests of the installer itself.
+#   --version <vX.Y.Z>         Same as setting AGENT_MEMORY_VERSION.
+#   --install-dir <dir>        Same as setting AGENT_MEMORY_INSTALL_DIR.
+#   --libexec-dir <dir>        Same as setting AGENT_MEMORY_LIBEXEC_DIR.
 
 set -eu
+
+LOCAL_TARBALL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --local-tarball)
+            [ $# -ge 2 ] || { echo "--local-tarball requires a path" >&2; exit 1; }
+            LOCAL_TARBALL="$2"
+            shift 2
+            ;;
+        --version)
+            [ $# -ge 2 ] || { echo "--version requires a tag" >&2; exit 1; }
+            AGENT_MEMORY_VERSION="$2"
+            shift 2
+            ;;
+        --install-dir)
+            [ $# -ge 2 ] || { echo "--install-dir requires a path" >&2; exit 1; }
+            AGENT_MEMORY_INSTALL_DIR="$2"
+            shift 2
+            ;;
+        --libexec-dir)
+            [ $# -ge 2 ] || { echo "--libexec-dir requires a path" >&2; exit 1; }
+            AGENT_MEMORY_LIBEXEC_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            sed -n '1,40p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "unknown arg: $1" >&2
+            exit 1
+            ;;
+    esac
+done
 
 REPO="${AGENT_MEMORY_REPO:-ben1787/agent-memory}"
 INSTALL_DIR="${AGENT_MEMORY_INSTALL_DIR:-$HOME/.local/bin}"
@@ -92,56 +137,68 @@ LIBEXEC_DIR="${AGENT_MEMORY_LIBEXEC_DIR:-$HOME/.local/share/agent-memory}"
 
 bold "Installing agent-memory"
 info "host:        ${os_slug}-${arch_slug}"
-info "repo:        ${REPO}"
+if [ -n "$LOCAL_TARBALL" ]; then
+    info "source:      local tarball ${LOCAL_TARBALL}"
+else
+    info "repo:        ${REPO}"
+fi
 info "binary link: ${INSTALL_DIR}/agent-memory"
 info "bundle dir:  ${LIBEXEC_DIR}"
 
-# --- Resolve version ----------------------------------------------------------
-if [ -n "${AGENT_MEMORY_VERSION:-}" ]; then
-    VERSION="$AGENT_MEMORY_VERSION"
-else
-    info "resolving latest release..."
-    LATEST_URL="https://api.github.com/repos/${REPO}/releases/latest"
-    if [ "$DOWNLOADER" = "curl" ]; then
-        LATEST_JSON="$(curl -fsSL "$LATEST_URL" || true)"
-    else
-        LATEST_JSON="$(wget -qO- "$LATEST_URL" || true)"
-    fi
-    [ -n "$LATEST_JSON" ] || die "failed to query GitHub releases API at $LATEST_URL"
-    VERSION="$(printf '%s\n' "$LATEST_JSON" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
-    [ -n "$VERSION" ] || die "could not parse latest release tag (rate limited? authentication required?)"
-fi
-info "version: $VERSION"
-
-# --- Download + verify --------------------------------------------------------
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-BINARY_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET}"
-SHA_URL="${BINARY_URL}.sha256"
-
-info "downloading binary from ${BINARY_URL}"
-download "$BINARY_URL" "${TMPDIR}/${ASSET}"
-
-info "downloading checksum"
-download "$SHA_URL" "${TMPDIR}/${ASSET}.sha256"
-
-info "verifying checksum"
-EXPECTED_SHA="$(awk '{print $1}' "${TMPDIR}/${ASSET}.sha256")"
-[ -n "$EXPECTED_SHA" ] || die "checksum file is empty"
-
-if command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL_SHA="$(sha256sum "${TMPDIR}/${ASSET}" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-    ACTUAL_SHA="$(shasum -a 256 "${TMPDIR}/${ASSET}" | awk '{print $1}')"
+if [ -n "$LOCAL_TARBALL" ]; then
+    # --- Local tarball mode (dev/CI smoke test) -------------------------------
+    [ -f "$LOCAL_TARBALL" ] || die "local tarball does not exist: $LOCAL_TARBALL"
+    VERSION="${AGENT_MEMORY_VERSION:-local-$(date +%s)}"
+    info "version:     ${VERSION} (local install)"
+    cp "$LOCAL_TARBALL" "${TMPDIR}/${ASSET}"
+    info "skipping checksum verification (local install mode)"
 else
-    die "need either sha256sum or shasum to verify the download"
-fi
+    # --- Resolve version --------------------------------------------------
+    if [ -n "${AGENT_MEMORY_VERSION:-}" ]; then
+        VERSION="$AGENT_MEMORY_VERSION"
+    else
+        info "resolving latest release..."
+        LATEST_URL="https://api.github.com/repos/${REPO}/releases/latest"
+        if [ "$DOWNLOADER" = "curl" ]; then
+            LATEST_JSON="$(curl -fsSL "$LATEST_URL" || true)"
+        else
+            LATEST_JSON="$(wget -qO- "$LATEST_URL" || true)"
+        fi
+        [ -n "$LATEST_JSON" ] || die "failed to query GitHub releases API at $LATEST_URL"
+        VERSION="$(printf '%s\n' "$LATEST_JSON" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+        [ -n "$VERSION" ] || die "could not parse latest release tag (rate limited? authentication required?)"
+    fi
+    info "version:     $VERSION"
 
-if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-    die "checksum mismatch! expected $EXPECTED_SHA, got $ACTUAL_SHA — refusing to install"
+    BINARY_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET}"
+    SHA_URL="${BINARY_URL}.sha256"
+
+    info "downloading binary from ${BINARY_URL}"
+    download "$BINARY_URL" "${TMPDIR}/${ASSET}"
+
+    info "downloading checksum"
+    download "$SHA_URL" "${TMPDIR}/${ASSET}.sha256"
+
+    info "verifying checksum"
+    EXPECTED_SHA="$(awk '{print $1}' "${TMPDIR}/${ASSET}.sha256")"
+    [ -n "$EXPECTED_SHA" ] || die "checksum file is empty"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL_SHA="$(sha256sum "${TMPDIR}/${ASSET}" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL_SHA="$(shasum -a 256 "${TMPDIR}/${ASSET}" | awk '{print $1}')"
+    else
+        die "need either sha256sum or shasum to verify the download"
+    fi
+
+    if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+        die "checksum mismatch! expected $EXPECTED_SHA, got $ACTUAL_SHA — refusing to install"
+    fi
+    green "  checksum ok"
 fi
-green "  checksum ok"
 
 # --- Extract bundle + install symlink ----------------------------------------
 need_cmd tar
