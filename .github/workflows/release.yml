@@ -83,15 +83,17 @@ jobs:
         # have this problem because no CUDA wheels exist for those platforms.
         if: runner.os == 'Linux'
         shell: bash
+        # Use `uv pip` rather than `python -m pip`: `uv sync` does not install
+        # pip into the managed venv, so `python -m pip` fails with
+        # "No module named pip". `uv pip` operates on the venv directly.
         run: |
-          source .venv/bin/activate
-          NVIDIA_PKGS=$(python -m pip list --format=freeze \
+          NVIDIA_PKGS=$(uv pip list --python .venv --format=freeze \
             | grep -E '^(nvidia-|triton==)' \
             | cut -d= -f1 \
             | tr '\n' ' ')
           echo "Stripping: $NVIDIA_PKGS"
           if [ -n "$NVIDIA_PKGS" ]; then
-            python -m pip uninstall -y $NVIDIA_PKGS
+            uv pip uninstall --python .venv $NVIDIA_PKGS
           fi
           echo "After strip:"
           du -sh .venv 2>/dev/null || true
