@@ -73,33 +73,28 @@ jobs:
           uv pip install --python .venv pyinstaller
 
       - name: Strip CUDA libs on Linux
-        # On Linux, `pip install onnxruntime` (a transitive dep of fastembed)
-        # bundles ~2.4 GB of nvidia-* CUDA runtime wheels (cublas, cudnn,
-        # cufft, curand, cusolver, cusparse, nccl, nvjitlink, nvtx) even though
-        # we never invoke a GPU execution provider. Without stripping them the
-        # PyInstaller bundle is 2.5 GB, which exceeds GitHub's 2 GiB per-asset
-        # release limit. macOS arm64 / Windows don't have this problem because
-        # there are no CUDA wheels for those platforms.
+        # On Linux, fastembed's transitive deps pull ~2.4 GB of nvidia-*
+        # CUDA runtime wheels (cublas, cudnn, cufft, nccl, nvshmem, ...),
+        # mixing cu12, cu13, and unsuffixed package names. We never invoke a
+        # GPU execution provider, so without stripping them the PyInstaller
+        # bundle hits 2.5 GB and blows past GitHub's 2 GiB per-release-asset
+        # limit. Enumerate dynamically — hardcoded names go stale every time
+        # NVIDIA bumps the CUDA major version. macOS arm64 / Windows don't
+        # have this problem because no CUDA wheels exist for those platforms.
         if: runner.os == 'Linux'
         shell: bash
         run: |
           source .venv/bin/activate
-          python -m pip uninstall -y \
-            nvidia-cublas-cu12 \
-            nvidia-cuda-cupti-cu12 \
-            nvidia-cuda-nvrtc-cu12 \
-            nvidia-cuda-runtime-cu12 \
-            nvidia-cudnn-cu12 \
-            nvidia-cufft-cu12 \
-            nvidia-curand-cu12 \
-            nvidia-cusolver-cu12 \
-            nvidia-cusparse-cu12 \
-            nvidia-cusparselt-cu12 \
-            nvidia-nccl-cu12 \
-            nvidia-nvjitlink-cu12 \
-            nvidia-nvtx-cu12 \
-            triton \
-            || true
+          NVIDIA_PKGS=$(python -m pip list --format=freeze \
+            | grep -E '^(nvidia-|triton==)' \
+            | cut -d= -f1 \
+            | tr '\n' ' ')
+          echo "Stripping: $NVIDIA_PKGS"
+          if [ -n "$NVIDIA_PKGS" ]; then
+            python -m pip uninstall -y $NVIDIA_PKGS
+          fi
+          echo "After strip:"
+          du -sh .venv 2>/dev/null || true
 
       - name: Run tests before building binary
         shell: bash
