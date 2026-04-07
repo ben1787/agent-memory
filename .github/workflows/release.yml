@@ -72,6 +72,35 @@ jobs:
           uv sync --group dev
           uv pip install --python .venv pyinstaller
 
+      - name: Strip CUDA libs on Linux
+        # On Linux, `pip install onnxruntime` (a transitive dep of fastembed)
+        # bundles ~2.4 GB of nvidia-* CUDA runtime wheels (cublas, cudnn,
+        # cufft, curand, cusolver, cusparse, nccl, nvjitlink, nvtx) even though
+        # we never invoke a GPU execution provider. Without stripping them the
+        # PyInstaller bundle is 2.5 GB, which exceeds GitHub's 2 GiB per-asset
+        # release limit. macOS arm64 / Windows don't have this problem because
+        # there are no CUDA wheels for those platforms.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          python -m pip uninstall -y \
+            nvidia-cublas-cu12 \
+            nvidia-cuda-cupti-cu12 \
+            nvidia-cuda-nvrtc-cu12 \
+            nvidia-cuda-runtime-cu12 \
+            nvidia-cudnn-cu12 \
+            nvidia-cufft-cu12 \
+            nvidia-curand-cu12 \
+            nvidia-cusolver-cu12 \
+            nvidia-cusparse-cu12 \
+            nvidia-cusparselt-cu12 \
+            nvidia-nccl-cu12 \
+            nvidia-nvjitlink-cu12 \
+            nvidia-nvtx-cu12 \
+            triton \
+            || true
+
       - name: Run tests before building binary
         shell: bash
         run: |
@@ -83,6 +112,10 @@ jobs:
         run: |
           source .venv/bin/activate || source .venv/Scripts/activate
           pyinstaller pyinstaller/agent-memory.spec --clean --noconfirm
+          # Print bundle size so future-us can spot bloat regressions in the
+          # workflow log without spelunking through artifacts. GitHub's
+          # per-release-asset limit is 2 GiB.
+          du -sh dist/agent-memory 2>/dev/null || true
 
       - name: Smoke-test the binary
         shell: bash
