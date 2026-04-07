@@ -25,14 +25,6 @@ curl -LsSf https://raw.githubusercontent.com/ben1787/agent-memory/main/install.s
 
 That detects your platform, downloads the right prebuilt binary from the latest GitHub release, verifies its sha256, drops it at `~/.local/bin/agent-memory`, and ensures `~/.local/bin` is on your `PATH`. After it finishes, `agent-memory` is on PATH from any directory.
 
-### Homebrew
-
-```bash
-brew install ben1787/tap/agent-memory
-```
-
-Same binary, same source of truth, just installed through Homebrew on macOS.
-
 ### From source (developers)
 
 If you're hacking on agent-memory itself, install from a local checkout with `uv`:
@@ -197,7 +189,7 @@ pyinstaller pyinstaller/agent-memory.spec --clean --noconfirm
 ./dist/agent-memory --version
 ```
 
-The `.github/workflows/release.yml` matrix runs the same `pyinstaller` invocation on macOS arm64/x86_64, Linux x86_64/arm64, and Windows x86_64 runners on every `v*` tag, then uploads the artifacts to a GitHub Release and bumps the Homebrew tap formula.
+The `.github/workflows/release.yml` matrix runs the same `pyinstaller` invocation on macOS arm64/x86_64, Linux x86_64/arm64, and Windows x86_64 runners on every `v*` tag, then uploads the artifacts to a GitHub Release.
 
 ## Versioning
 

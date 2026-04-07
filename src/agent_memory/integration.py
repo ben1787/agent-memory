@@ -753,8 +753,8 @@ def _shell_command_for_hook(project_root: Path, hook_name: str) -> str:
     """Build a portable hook command line.
 
     Emits `AGENT_MEMORY_PROJECT_ROOT=<root> agent-memory _hook <hook-name>` —
-    relies on `agent-memory` being on PATH (true for any of: uv tool install,
-    curl-installed binary, brew install, npx). The previous form embedded an
+    relies on `agent-memory` being on PATH (true for both the curl-installed
+    binary and `uv tool install` paths). The previous form embedded an
     absolute path to a specific Python interpreter, which broke the hook on
     every machine other than the one that ran `init`.
     """
