@@ -125,6 +125,13 @@ case "$ARCH_NAME" in
     *)                    die "unsupported architecture: $ARCH_NAME" ;;
 esac
 
+# Intel macOS is not in the release matrix — GitHub retired the free macos-13
+# runner image so we can't build those binaries. Tell Intel-Mac users up front
+# to install from source instead of failing on a 404 halfway through.
+if [ "$os_slug" = "macos" ] && [ "$arch_slug" = "x86_64" ]; then
+    die "Intel macOS is not a published release target. Install from source with: uv tool install git+https://github.com/ben1787/agent-memory"
+fi
+
 ASSET_BASE="agent-memory-${os_slug}-${arch_slug}"
 ASSET="${ASSET_BASE}.tar.gz"
 

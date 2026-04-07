@@ -59,8 +59,9 @@ def _detect_asset_name() -> str | None:
     if system == "Darwin":
         if machine in ("arm64", "aarch64"):
             return "agent-memory-macos-arm64"
-        if machine in ("x86_64", "amd64"):
-            return "agent-memory-macos-x86_64"
+        # Intel macOS is not built in the release matrix (GitHub retired the
+        # free macos-13 runner). Fall through to None — the upgrade command
+        # will report no matching asset.
     elif system == "Linux":
         if machine in ("x86_64", "amd64"):
             return "agent-memory-linux-x86_64"

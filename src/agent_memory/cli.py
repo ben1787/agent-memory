@@ -34,7 +34,9 @@ from agent_memory.integration import (
     uninstall_memory_instructions,
 )
 from agent_memory.mcp_server import serve
-from agent_memory.smoke_test import SmokeTestError, run_codex_smoke_test
+# smoke_test is POSIX-only (uses pty/fcntl/termios). Import lazily from inside
+# the command so `agent-memory --help` and every other command still work on
+# Windows, where the module cannot be imported at all.
 from agent_memory.store import GraphStore
 from agent_memory.hooks.common import hook_log_entries
 
@@ -1200,6 +1202,15 @@ def smoke_test(
     ),
     as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
+    try:
+        # Lazy import: smoke_test uses pty/fcntl/termios which don't exist on
+        # Windows. Importing at module scope would break `agent-memory` on
+        # Windows entirely.
+        from agent_memory.smoke_test import SmokeTestError, run_codex_smoke_test
+    except ModuleNotFoundError as exc:
+        raise typer.BadParameter(
+            f"smoke-test is POSIX-only and cannot run on this platform: {exc}"
+        ) from exc
     try:
         result = run_codex_smoke_test(
             project_root=project,

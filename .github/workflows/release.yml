@@ -30,10 +30,12 @@ jobs:
             runner: macos-14
             asset_suffix: macos-arm64
             archive_ext: tar.gz
-          - target: macos-x86_64
-            runner: macos-13
-            asset_suffix: macos-x86_64
-            archive_ext: tar.gz
+          # macos-x86_64 dropped: GitHub retired the free `macos-13` runner
+          # image ("configuration 'macos-13-us-default' is not supported"),
+          # and cross-compiling Intel binaries from the arm64 runner is not
+          # worth the complexity for a dying architecture. Intel Mac users
+          # can run the arm64 binary under Rosetta is NOT true — they'd need
+          # to build from source via `uv tool install git+https://github.com/ben1787/agent-memory`.
           - target: linux-x86_64
             runner: ubuntu-22.04
             asset_suffix: linux-x86_64

@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+import pytest
+
+# smoke_test uses pty/fcntl/termios which don't exist on Windows. Skip the
+# entire module there so the CI matrix still builds Windows artifacts.
+if sys.platform.startswith("win"):
+    pytest.skip("smoke_test is POSIX-only", allow_module_level=True)
 
 from typer.testing import CliRunner
 
@@ -85,8 +93,10 @@ def test_run_codex_smoke_test_requires_destructive_for_explicit_project(tmp_path
 def test_smoke_test_command_prints_json(monkeypatch) -> None:
     runner = CliRunner()
 
+    # cli.py lazy-imports run_codex_smoke_test from agent_memory.smoke_test
+    # so Windows can still load the CLI. Patch at the source module.
     monkeypatch.setattr(
-        "agent_memory.cli.run_codex_smoke_test",
+        "agent_memory.smoke_test.run_codex_smoke_test",
         lambda **kwargs: SmokeTestResult(
             repo_root="/tmp/repo",
             first_session_file="/tmp/first-session.jsonl",
