@@ -10,14 +10,20 @@
 #      $AGENT_MEMORY_VERSION if set)
 #   3. Downloads the matching binary + its .sha256 checksum
 #   4. Verifies the checksum
-#   5. Installs the binary to ~/.local/bin/agent-memory (or $AGENT_MEMORY_INSTALL_DIR
-#      if set)
-#   6. Adds ~/.local/bin to your shell rc PATH if it isn't already there
+#   5. Picks an install directory that's ALREADY on $PATH so the binary works
+#      immediately without restarting any shells. Priority:
+#         /opt/homebrew/bin → /usr/local/bin → first writable dir on PATH
+#         → ~/.local/bin (with rc-file edits + restart warning).
+#      Override with $AGENT_MEMORY_INSTALL_DIR.
+#   6. Symlinks the binary into the chosen install directory.
 #   7. Prints next steps
 #
 # Environment overrides:
 #   AGENT_MEMORY_VERSION       Tag to install, e.g. v0.2.1. Defaults to latest.
-#   AGENT_MEMORY_INSTALL_DIR   Install directory. Defaults to ~/.local/bin.
+#   AGENT_MEMORY_INSTALL_DIR   Install directory. Defaults to the first dir
+#                              already on $PATH that's writable without sudo
+#                              (/opt/homebrew/bin on Apple Silicon, etc.),
+#                              falling back to ~/.local/bin.
 #   AGENT_MEMORY_LIBEXEC_DIR   Bundle extraction root. Defaults to
 #                              ~/.local/share/agent-memory.
 #   AGENT_MEMORY_REPO          GitHub repo path "owner/name". Defaults to the
@@ -69,7 +75,57 @@ while [ $# -gt 0 ]; do
 done
 
 REPO="${AGENT_MEMORY_REPO:-ben1787/agent-memory}"
-INSTALL_DIR="${AGENT_MEMORY_INSTALL_DIR:-$HOME/.local/bin}"
+
+# Pick an install dir that's ALREADY on $PATH so the binary works immediately
+# in every shell — current terminal, new terminals, and any subprocess shells
+# spawned by AI agents that don't source rc files (e.g. `/bin/sh -c`).
+#
+# Priority:
+#   1. AGENT_MEMORY_INSTALL_DIR (explicit override) — always wins.
+#   2. /opt/homebrew/bin if it exists, is on PATH, and is user-writable
+#      (Apple Silicon Homebrew default — owned by the user, no sudo needed).
+#   3. /usr/local/bin if it exists, is on PATH, and is writable without sudo
+#      (Intel Mac Homebrew, many Linux distros).
+#   4. Any other directory on PATH that the user can write to.
+#   5. Fall back to ~/.local/bin and edit shell rc files (won't work for
+#      already-running agents — see warning at end of install).
+pick_install_dir() {
+    # Try the canonical "owned by user, on PATH by default" Homebrew prefixes
+    # first. We check writability but NOT $PATH, because the install script
+    # may itself be running in a stripped-PATH subprocess (e.g. piped from
+    # curl into /bin/sh), while the user's actual interactive shell has
+    # /opt/homebrew/bin on its PATH thanks to /etc/zprofile.
+    local d
+    for d in /opt/homebrew/bin /usr/local/bin; do
+        if [ -d "$d" ] && [ -w "$d" ]; then
+            echo "$d"
+            return 0
+        fi
+    done
+    # Otherwise walk the current $PATH for any user-writable dir we can use.
+    local IFS=":"
+    for d in $PATH; do
+        if [ -n "$d" ] && [ -d "$d" ] && [ -w "$d" ]; then
+            case "$d" in
+                "$HOME/.local/bin"|"$HOME/bin") continue ;;
+                /tmp*|/var/tmp*) continue ;;
+            esac
+            echo "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -n "${AGENT_MEMORY_INSTALL_DIR:-}" ]; then
+    INSTALL_DIR="$AGENT_MEMORY_INSTALL_DIR"
+    INSTALL_DIR_ON_PATH="explicit"
+elif INSTALL_DIR="$(pick_install_dir)"; then
+    INSTALL_DIR_ON_PATH="yes"
+else
+    INSTALL_DIR="$HOME/.local/bin"
+    INSTALL_DIR_ON_PATH="no"
+fi
 
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -242,26 +298,51 @@ ln -s "$BUNDLE_BINARY" "${INSTALL_DIR}/agent-memory"
 green "installed: ${INSTALL_DIR}/agent-memory -> ${BUNDLE_BINARY}"
 
 # --- Ensure $INSTALL_DIR is on PATH ------------------------------------------
-case ":$PATH:" in
-    *":${INSTALL_DIR}:"*)
-        green "PATH already contains ${INSTALL_DIR}"
+# If we picked a dir that's already on PATH (the common case on macOS thanks
+# to Homebrew), we're done — agent-memory will work in every shell, including
+# subprocess shells launched by AI agents.
+#
+# If we had to fall back to ~/.local/bin, edit every shell rc file we can
+# find AND warn loudly that already-running processes (terminals, agent
+# harnesses) need to be restarted.
+case "$INSTALL_DIR_ON_PATH" in
+    yes)
+        green "installed onto existing PATH dir: ${INSTALL_DIR}"
         ;;
-    *)
-        # Choose the right shell rc to update.
-        SHELL_NAME="${SHELL##*/}"
-        case "$SHELL_NAME" in
-            zsh)  RC_FILE="${ZDOTDIR:-$HOME}/.zshrc" ;;
-            bash) RC_FILE="$HOME/.bashrc" ;;
-            *)    RC_FILE="$HOME/.profile" ;;
+    explicit)
+        case ":$PATH:" in
+            *":${INSTALL_DIR}:"*) green "PATH already contains ${INSTALL_DIR}" ;;
+            *) red "warning: ${INSTALL_DIR} is NOT on PATH — you set it explicitly via AGENT_MEMORY_INSTALL_DIR; add it to PATH yourself" ;;
         esac
+        ;;
+    no)
+        red "warning: no writable directory on PATH was found, fell back to ${INSTALL_DIR}"
+        # Edit every plausible rc file so future shells of any flavor pick it
+        # up. Existing processes still need to be restarted.
         PATH_LINE="export PATH=\"${INSTALL_DIR}:\$PATH\""
-        if [ -f "$RC_FILE" ] && grep -Fxq "$PATH_LINE" "$RC_FILE"; then
-            info "PATH line already present in ${RC_FILE}"
-        else
-            printf '\n# added by agent-memory installer\n%s\n' "$PATH_LINE" >> "$RC_FILE"
-            green "appended PATH line to ${RC_FILE}"
-            info "open a new terminal, or run: source ${RC_FILE}"
-        fi
+        for RC_FILE in \
+            "${ZDOTDIR:-$HOME}/.zshrc" \
+            "${ZDOTDIR:-$HOME}/.zshenv" \
+            "$HOME/.bashrc" \
+            "$HOME/.bash_profile" \
+            "$HOME/.profile"
+        do
+            [ -e "$RC_FILE" ] || [ "$RC_FILE" = "${ZDOTDIR:-$HOME}/.zshrc" ] || continue
+            if [ -f "$RC_FILE" ] && grep -Fxq "$PATH_LINE" "$RC_FILE"; then
+                info "PATH line already present in ${RC_FILE}"
+            else
+                printf '\n# added by agent-memory installer\n%s\n' "$PATH_LINE" >> "$RC_FILE"
+                green "appended PATH line to ${RC_FILE}"
+            fi
+        done
+        echo
+        red "==============================================================================="
+        red "  IMPORTANT: ${INSTALL_DIR} was not on PATH."
+        red "  agent-memory was installed but you must RESTART any already-running"
+        red "  terminals AND any AI agents (Claude Code, Codex, etc.) for them to find"
+        red "  the binary. Sourcing your rc file does NOT fix existing subprocess shells."
+        red "==============================================================================="
+        echo
         ;;
 esac
 
