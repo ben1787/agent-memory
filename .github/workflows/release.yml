@@ -62,9 +62,12 @@ jobs:
         run: uv python install 3.11
 
       - name: Install build dependencies
+        # `uv sync --group dev` creates .venv AND installs the project + the
+        # `[dependency-groups] dev` block from pyproject.toml. The earlier
+        # `-e ".[dev]"` form silently dropped pytest because PEP 621 extras
+        # and PEP 735 dependency groups are different things.
         run: |
-          uv venv .venv
-          uv pip install --python .venv -e ".[dev]"
+          uv sync --group dev
           uv pip install --python .venv pyinstaller
 
       - name: Run tests before building binary
