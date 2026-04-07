@@ -25,33 +25,30 @@ class AgentMemory < Formula
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/ben1787/agent-memory/releases/download/v0.1.0/agent-memory-macos-arm64"
+      url "https://github.com/ben1787/agent-memory/releases/download/v0.1.0/agent-memory-macos-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/ben1787/agent-memory/releases/download/v0.1.0/agent-memory-macos-x86_64"
+      url "https://github.com/ben1787/agent-memory/releases/download/v0.1.0/agent-memory-macos-x86_64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/ben1787/agent-memory/releases/download/v0.1.0/agent-memory-linux-arm64"
+      url "https://github.com/ben1787/agent-memory/releases/download/v0.1.0/agent-memory-linux-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/ben1787/agent-memory/releases/download/v0.1.0/agent-memory-linux-x86_64"
+      url "https://github.com/ben1787/agent-memory/releases/download/v0.1.0/agent-memory-linux-x86_64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   def install
-    # The downloaded artifact is the bare binary (not a tarball), so we
-    # rename it to `agent-memory` and drop it in the bin directory.
-    binary_name = if OS.mac?
-                    Hardware::CPU.arm? ? "agent-memory-macos-arm64" : "agent-memory-macos-x86_64"
-                  else
-                    Hardware::CPU.arm? ? "agent-memory-linux-arm64" : "agent-memory-linux-x86_64"
-                  end
-    bin.install binary_name => "agent-memory"
+    # The tarball extracts to ./agent-memory/ — a PyInstaller onedir bundle
+    # with the binary alongside its native libs and bundled data files.
+    # Drop the whole bundle into libexec, then symlink the bootloader into bin.
+    libexec.install Dir["agent-memory/*"]
+    bin.install_symlink libexec/"agent-memory"
   end
 
   test do

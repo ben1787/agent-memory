@@ -80,12 +80,21 @@ case "$ARCH_NAME" in
     *)                    die "unsupported architecture: $ARCH_NAME" ;;
 esac
 
-ASSET="agent-memory-${os_slug}-${arch_slug}"
+ASSET_BASE="agent-memory-${os_slug}-${arch_slug}"
+ASSET="${ASSET_BASE}.tar.gz"
+
+# Where to extract the unpacked PyInstaller onedir bundle. The download is a
+# ~180MB tarball that extracts to ~530MB. We extract once into LIBEXEC_DIR
+# and symlink INSTALL_DIR/agent-memory at the bootloader inside, so cold
+# start is fast (no per-call extraction) and multiple installed versions
+# can coexist for `agent-memory upgrade`.
+LIBEXEC_DIR="${AGENT_MEMORY_LIBEXEC_DIR:-$HOME/.local/share/agent-memory}"
 
 bold "Installing agent-memory"
-info "host:    ${os_slug}-${arch_slug}"
-info "repo:    ${REPO}"
-info "target:  ${INSTALL_DIR}/agent-memory"
+info "host:        ${os_slug}-${arch_slug}"
+info "repo:        ${REPO}"
+info "binary link: ${INSTALL_DIR}/agent-memory"
+info "bundle dir:  ${LIBEXEC_DIR}"
 
 # --- Resolve version ----------------------------------------------------------
 if [ -n "${AGENT_MEMORY_VERSION:-}" ]; then
@@ -134,12 +143,39 @@ if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
 fi
 green "  checksum ok"
 
-# --- Install ------------------------------------------------------------------
-mkdir -p "$INSTALL_DIR"
-mv "${TMPDIR}/${ASSET}" "${INSTALL_DIR}/agent-memory"
-chmod +x "${INSTALL_DIR}/agent-memory"
+# --- Extract bundle + install symlink ----------------------------------------
+need_cmd tar
 
-green "installed: ${INSTALL_DIR}/agent-memory"
+VERSION_DIR="${LIBEXEC_DIR}/${VERSION}"
+mkdir -p "$LIBEXEC_DIR"
+
+# If this exact version is already extracted, reuse it. Otherwise extract fresh.
+if [ -d "$VERSION_DIR" ]; then
+    info "bundle for ${VERSION} already extracted at ${VERSION_DIR}; reusing"
+else
+    info "extracting bundle to ${VERSION_DIR}"
+    EXTRACT_TMP="$(mktemp -d)"
+    tar -xzf "${TMPDIR}/${ASSET}" -C "$EXTRACT_TMP"
+    if [ ! -d "${EXTRACT_TMP}/agent-memory" ]; then
+        rm -rf "$EXTRACT_TMP"
+        die "tarball did not contain expected agent-memory/ directory"
+    fi
+    # Atomic move into the version directory.
+    mv "${EXTRACT_TMP}/agent-memory" "$VERSION_DIR"
+    rm -rf "$EXTRACT_TMP"
+fi
+
+BUNDLE_BINARY="${VERSION_DIR}/agent-memory"
+[ -x "$BUNDLE_BINARY" ] || die "extracted bundle is missing the agent-memory bootloader at ${BUNDLE_BINARY}"
+
+mkdir -p "$INSTALL_DIR"
+# Replace any existing symlink/file at the target with a fresh symlink at the
+# new version's bootloader. We use a symlink so `agent-memory upgrade` can
+# atomically swap versions by re-pointing the link.
+rm -f "${INSTALL_DIR}/agent-memory"
+ln -s "$BUNDLE_BINARY" "${INSTALL_DIR}/agent-memory"
+
+green "installed: ${INSTALL_DIR}/agent-memory -> ${BUNDLE_BINARY}"
 
 # --- Ensure $INSTALL_DIR is on PATH ------------------------------------------
 case ":$PATH:" in

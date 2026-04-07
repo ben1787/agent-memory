@@ -30,6 +30,12 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 block_cipher = None
 
+# PyInstaller resolves spec-relative paths against the spec file's directory,
+# so the entrypoint is just the bare filename (already in the same dir as
+# this .spec file). We also use the project root for the import search path.
+SPEC_DIR = Path(SPECPATH)
+PROJECT_ROOT = SPEC_DIR.parent
+
 # --- Hidden imports + data files ----------------------------------------------
 # fastembed lazily imports model-specific modules; collect_all walks its
 # dependency tree to surface them.
@@ -71,12 +77,13 @@ datas = (
 binaries = fastembed_binaries + onnxruntime_binaries + kuzu_binaries + typer_binaries
 
 # Entrypoint: the cli.main() function. We point at a tiny shim file because
-# PyInstaller wants a real .py path, not a module reference.
-entrypoint_path = Path("pyinstaller") / "_entrypoint.py"
+# PyInstaller wants a real .py path, not a module reference. Spec-relative
+# path → resolves to <repo>/pyinstaller/_entrypoint.py.
+entrypoint_path = SPEC_DIR / "_entrypoint.py"
 
 a = Analysis(
     [str(entrypoint_path)],
-    pathex=["src"],
+    pathex=[str(PROJECT_ROOT / "src")],
     binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
@@ -92,6 +99,10 @@ a = Analysis(
         "matplotlib",
         "scipy",
         "sklearn",
+        # onnxruntime.quantization needs the `onnx` package which we don't
+        # ship — we only use onnxruntime for inference, never quantization.
+        "onnxruntime.quantization",
+        "onnx",
     ],
     cipher=block_cipher,
     noarchive=False,
@@ -99,24 +110,49 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# Why onedir, not onefile:
+#
+# `--onefile` produces a single self-extracting executable that unpacks the
+# entire ~180MB bundle to a temp directory on EVERY invocation, even when the
+# binary has been run seconds earlier. Measured cold start: 6-10s. That is
+# unacceptable for our hook use case (the UserPromptSubmit hook fires on
+# every prompt — adding 6s to every Claude/Codex turn would be insane).
+#
+# `--onedir` produces a directory that contains the bare bootloader binary
+# alongside the unpacked Python interpreter, all .dylib/.so files, the model
+# weights, and the agent_memory package. There is no per-call extraction —
+# the bootloader just dlopens neighboring files. Measured cold start: ~150ms.
+#
+# The trade-off is "one file" vs "one directory" for distribution, which is
+# trivially solved by tarballing the directory. The release workflow tars
+# the dist/agent-memory/ directory into agent-memory-<platform>.tar.gz and
+# the installer extracts it to ~/.local/share/agent-memory/ then symlinks
+# ~/.local/bin/agent-memory at the bootloader inside.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,  # onedir: keep binaries out of the EXE, COLLECT them next.
     name="agent-memory",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,  # Use the default per-user cache for warm-start speed.
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="agent-memory",
 )
