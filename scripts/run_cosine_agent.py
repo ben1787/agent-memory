@@ -23,7 +23,7 @@ from agent_memory.engine import AgentMemory
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the graph-recall OpenAI agent.")
+    parser = argparse.ArgumentParser(description="Run the flat-cosine OpenAI agent.")
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--model-id", default=DEFAULT_ANSWER_MODEL_ID)
     # Reason: default raised to 20 to match compare_isolated_agents. See
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_graph_agent(
+def build_cosine_agent(
     *,
     memory: AgentMemory,
     model: str,
@@ -43,24 +43,23 @@ def build_graph_agent(
     call_log: list[dict[str, Any]],
     recall_limit: int,
 ) -> Agent[Any]:
-    # Reason: closure over the per-case hit sink + retrieval timer + call
-    # log so the outer run_sync call can read all three after each case
-    # completes. We rebuild the Agent per case to get a fresh closure
-    # scope; this is cheap because the tool decorator is the only stateful
-    # piece. The call log captures (query, limit, ms, hit_ids) for every
-    # tool invocation so we can diagnose iteration behavior afterwards.
+    # Reason: this is the graph agent's twin — same store, same embedder,
+    # but the tool calls `recall_cosine` (flat top-N nearest neighbors)
+    # instead of `recall` (PPV graph spreading). Any quality difference
+    # between this and the graph agent is attributable purely to the
+    # graph-expansion step.
 
     @function_tool
-    def recall_graph_memories(query: str, limit: int = recall_limit) -> str:
-        """Retrieve the highest-scoring memories using PPV graph spreading.
+    def recall_cosine_memories(query: str, limit: int = recall_limit) -> str:
+        """Retrieve memories by flat cosine similarity (no graph walk).
 
-        Returns a JSON list of hits, each with memory_id, title, score, query_similarity,
-        and full text. Call multiple times with refined queries if the first pass is
-        insufficient.
+        Returns a JSON list of hits ranked purely by embedding similarity to the query,
+        with memory_id, title, score, and full text. Call multiple times with refined
+        queries if the first pass is insufficient.
         """
         bounded_limit = max(1, min(int(limit), 50))
         started = time.perf_counter()
-        result = memory.recall(query, limit=bounded_limit)
+        result = memory.recall_cosine(query, limit=bounded_limit)
         elapsed_ms = (time.perf_counter() - started) * 1000
         retrieval_time_ms.append(elapsed_ms)
         payload = []
@@ -105,17 +104,17 @@ def build_graph_agent(
         return json.dumps(payload, indent=2)
 
     return Agent(
-        name="Graph Recall Agent",
+        name="Cosine Recall Agent",
         instructions=(
-            "Answer the question using only the graph recall tool. "
-            "Call `recall_graph_memories` with the question (or a refined sub-query) "
+            "Answer the question using only the cosine recall tool. "
+            "Call `recall_cosine_memories` with the question (or a refined sub-query) "
             "to retrieve relevant memories from the local Agent Memory store. "
             "You may call the tool more than once with different phrasings if the "
             "first pass is insufficient. Cite only the memory IDs you actually used. "
             + ANSWER_INSTRUCTIONS_SUFFIX
         ),
         model=model,
-        tools=[recall_graph_memories],
+        tools=[recall_cosine_memories],
         output_type=AnswerFormat,
     )
 
@@ -127,12 +126,10 @@ def main() -> None:
         answerer = OpenAIAgentAnswerer(model=args.model_id, max_turns=args.max_turns)
         results: list[dict[str, object]] = []
         for case in BENCHMARK_CASES:
-            # Reason: fresh per-case state so hit accounting and timing
-            # are isolated between benchmark cases.
             case_hits: list[HitRecord] = []
             case_retrieval_ms: list[float] = []
             case_call_log: list[dict[str, Any]] = []
-            agent = build_graph_agent(
+            agent = build_cosine_agent(
                 memory=memory,
                 model=args.model_id,
                 hit_sink=case_hits,
@@ -145,14 +142,11 @@ def main() -> None:
             meta = {
                 "retrieval_ms": round(sum(case_retrieval_ms), 3),
                 "tool_calls": len(case_retrieval_ms),
-                # Reason: ship the per-call log so analysis scripts can see
-                # what each tool invocation actually asked and got, not
-                # just the deduped union across the whole case.
                 "tool_call_log": case_call_log,
             }
             results.append(
                 evaluate_path(
-                    label="graph",
+                    label="cosine",
                     case=case,
                     contexts=contexts,
                     retrieval_meta=meta,
@@ -160,7 +154,7 @@ def main() -> None:
                 )
             )
         payload = {
-            "system": "graph",
+            "system": "cosine",
             "model_id": args.model_id,
             "summary": summarize_results(results),
             "results": results,

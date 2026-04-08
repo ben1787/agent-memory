@@ -28,7 +28,6 @@ from agent_memory.models import (
     SaveManyResult,
     MemoryStats,
     SaveResult,
-    SimilarityEdge,
 )
 from agent_memory.operations_log import (
     OP_DELETE,
@@ -38,6 +37,7 @@ from agent_memory.operations_log import (
     LogEntry,
     OperationsLog,
 )
+from agent_memory.query_log import QUERY_LOG_FILENAME, log_query
 from agent_memory.store import GraphStore
 
 
@@ -150,6 +150,7 @@ class AgentMemory:
             read_only=read_only,
         )
         self.operations_log = OperationsLog(project.db_path.parent / OPERATIONS_LOG_FILENAME)
+        self._query_log_path = project.db_path.parent / QUERY_LOG_FILENAME
         self._memories: list[MemoryRecord] = []
         self._memory_by_id: dict[str, MemoryRecord] = {}
         self._memory_ids_in_order: list[str] = []
@@ -225,8 +226,14 @@ class AgentMemory:
         self._refresh_embedding_cache()
 
         neighbors = self._similarities_to_existing(resolved_embedding, existing)
+        # Reason: SIMILAR edges are not persisted to Kuzu. PPV reads from the
+        # in-memory `_strong_adjacency` dict, which `_reload_cache()` rebuilds
+        # from embeddings via a single numpy matmul (O(n^2) flops in a BLAS
+        # call). The persisted copy was a write-only duplicate that cost
+        # O(n) transactional round-trips per save — ~1s at n=1000 vs ~10ms
+        # for the matmul. We keep the adjacency update here so hot saves
+        # don't have to round-trip through _reload_cache().
         for candidate, score in neighbors:
-            self.store.create_similarity_pair(memory.id, candidate.id, score, timestamp)
             self._strong_adjacency.setdefault(memory.id, {})[candidate.id] = score
             self._strong_adjacency.setdefault(candidate.id, {})[memory.id] = score
         self._sorted_neighbors = None
@@ -306,14 +313,10 @@ class AgentMemory:
         )
 
         self.store.update_memory(updated)
-        # Drop stale SIMILAR edges and recompute against the current corpus.
-        self.store.delete_similarity_edges_for(existing.id)
-        self._reload_cache()
-
-        others = [m for m in self._memories if m.id != existing.id]
-        neighbors = self._similarities_to_existing(new_embedding, others)
-        for candidate, score in neighbors:
-            self.store.create_similarity_pair(existing.id, candidate.id, score, timestamp)
+        # Reason: `_reload_cache()` rebuilds `_strong_adjacency` from the
+        # current embedding matrix, so dropping the node's row and
+        # recomputing neighbors happens implicitly — no need to touch Kuzu
+        # SIMILAR rows (they are not read by recall anyway).
         self._reload_cache()
 
         if record_in_log:
@@ -428,12 +431,9 @@ class AgentMemory:
                 f"Cannot restore memory {memory.id!r}: id is already in use."
             )
         self.store.add_memory(memory)
-        # Recompute similarity edges from this restored node to the rest of the corpus.
-        existing = [m for m in self._memories if m.id != memory.id]
-        timestamp = utc_now()
-        neighbors = self._similarities_to_existing(memory.embedding, existing)
-        for candidate, score in neighbors:
-            self.store.create_similarity_pair(memory.id, candidate.id, score, timestamp)
+        # Reason: `_reload_cache()` rebuilds `_strong_adjacency` from the
+        # embedding matrix, which covers the restored node's neighbors for
+        # free. SIMILAR edges are no longer persisted (see _save_one).
         self._reload_cache()
         if record_in_log:
             self.operations_log.record_save(memory.id, _record_to_payload(memory))
@@ -517,6 +517,11 @@ class AgentMemory:
         if limit < 1:
             raise ValueError("Recall limit must be at least 1.")
 
+        # Reason: capture production query distribution to queries.jsonl so
+        # future algorithm changes can be replayed against real questions
+        # instead of synthetic benchmarks. Best-effort, never breaks recall.
+        log_query(self._query_log_path, cleaned_query, method="recall")
+
         memories = self._memories
         if not memories:
             return RecallResult(seed_ids=[], hits=[], seed_score=0.0)
@@ -550,6 +555,74 @@ class AgentMemory:
                     continue
                 cached.access_count += 1
                 cached.last_accessed = timestamp
+        return RecallResult(
+            seed_ids=[],
+            hits=ordered_hits,
+            seed_score=top_query_similarity,
+        )
+
+    def recall_cosine(
+        self,
+        query: str,
+        limit: int = 15,
+    ) -> RecallResult:
+        # Reason: flat top-N cosine recall with no graph traversal or PPV
+        # spreading. Exists as a baseline path so agents / benchmarks can
+        # compare "raw embedding nearest neighbors" against the default
+        # graph-expanded `recall()` on the same store, same embedder, same
+        # query. Returns the same RecallResult shape as `recall()` so
+        # downstream code can consume both paths uniformly.
+        cleaned_query = query.strip()
+        if not cleaned_query:
+            raise ValueError("Query cannot be empty.")
+        if limit < 1:
+            raise ValueError("Recall limit must be at least 1.")
+
+        # Reason: same query-distribution capture as recall(), tagged with
+        # method="recall_cosine" so the log distinguishes which path served
+        # the query.
+        log_query(self._query_log_path, cleaned_query, method="recall_cosine")
+
+        memories = self._memories
+        if not memories:
+            return RecallResult(seed_ids=[], hits=[], seed_score=0.0)
+
+        query_scores = self._query_similarities(cleaned_query)
+        ranked_memories = sorted(
+            self._memories,
+            key=lambda memory: (
+                self._path_weight(query_scores.get(memory.id, 0.0)),
+                memory.created_at,
+            ),
+            reverse=True,
+        )[:limit]
+
+        ordered_hits = [
+            MemoryHit(
+                memory_id=memory.id,
+                text=memory.text,
+                score=round(self._path_weight(query_scores.get(memory.id, 0.0)), 4),
+                query_similarity=round(query_scores.get(memory.id, 0.0), 4),
+                created_at=memory.created_at,
+            )
+            for memory in ranked_memories
+        ]
+        top_query_similarity = ordered_hits[0].score if ordered_hits else 0.0
+
+        # Reason: mirror the touch-on-read behavior of `recall()` so that
+        # access stats stay consistent regardless of which retrieval path
+        # produced the hit. Keeps read_only honored.
+        touched = [hit.memory_id for hit in ordered_hits]
+        if touched and not self.read_only:
+            timestamp = utc_now()
+            self.store.touch_memories(touched, timestamp)
+            for memory_id in set(touched):
+                cached = self._memory_by_id.get(memory_id)
+                if cached is None:
+                    continue
+                cached.access_count += 1
+                cached.last_accessed = timestamp
+
         return RecallResult(
             seed_ids=[],
             hits=ordered_hits,
@@ -600,16 +673,27 @@ class AgentMemory:
         )
 
     def stats(self) -> MemoryStats:
+        # Reason: SIMILAR edges live in the in-memory `_strong_adjacency`
+        # dict (rebuilt from embeddings on every _reload_cache), not in
+        # Kuzu. Report the undirected pair count to match the old shape
+        # (each pair was written twice as directed rows).
+        similarity_edge_count = sum(
+            len(neighbors) for neighbors in self._strong_adjacency.values()
+        )
         return MemoryStats(
             project_root=self.project.root,
             db_path=self.project.db_path,
             memory_count=len(self._memories),
-            similarity_edge_count=self.store.count_relationships("SIMILAR"),
+            similarity_edge_count=similarity_edge_count,
             next_edge_count=self.store.count_relationships("NEXT"),
         )
 
     def rewire(self) -> MemoryStats:
-        self.store.clear_relationships("SIMILAR")
+        # Reason: SIMILAR edges are no longer persisted, so there is
+        # nothing to "rewire" for similarity — _reload_cache rebuilds the
+        # in-memory adjacency from the current embedding matrix. NEXT
+        # edges are still persisted and can be rebuilt from the memory
+        # ordering.
         self.store.clear_relationships("NEXT")
         self._rebuild_relationships()
         self._reload_cache()
@@ -683,19 +767,6 @@ class AgentMemory:
             key=lambda item: item[1],
             reverse=True,
         )
-
-    def _build_adjacency(self, edges: list[SimilarityEdge]) -> dict[str, dict[str, float]]:
-        adjacency: dict[str, dict[str, float]] = defaultdict(dict)
-        for edge in edges:
-            adjacency[edge.source_id][edge.target_id] = max(
-                edge.weight,
-                adjacency[edge.source_id].get(edge.target_id, 0.0),
-            )
-            adjacency[edge.target_id][edge.source_id] = max(
-                edge.weight,
-                adjacency[edge.target_id].get(edge.source_id, 0.0),
-            )
-        return adjacency
 
     def _build_dense_adjacency(self) -> dict[str, dict[str, float]]:
         if self._embedding_matrix is None:
@@ -876,6 +947,10 @@ class AgentMemory:
         return "\n".join(f"- {sentence}" for sentence in sentences)
 
     def _rebuild_relationships(self) -> None:
+        # Reason: SIMILAR edges are not persisted (recall reads from the
+        # in-memory `_strong_adjacency` dict, which is rebuilt from
+        # embeddings via numpy matmul on every _reload_cache). Only NEXT
+        # edges need rewiring here.
         memories = self.store.list_memories()
         if not memories:
             return
@@ -883,11 +958,6 @@ class AgentMemory:
 
         for previous, current in zip(memories, memories[1:]):
             self.store.create_next_edge(previous.id, current.id, 1.0, timestamp)
-
-        for index, left in enumerate(memories):
-            for right in memories[index + 1 :]:
-                similarity = cosine_similarity(left.embedding, right.embedding)
-                self.store.create_similarity_pair(left.id, right.id, similarity, timestamp)
 
 
 def is_lock_conflict(error: Exception) -> bool:

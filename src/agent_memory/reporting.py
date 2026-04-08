@@ -21,6 +21,21 @@ def _winner_class(left: float, right: float, current: float) -> str:
     return "loser"
 
 
+def _winner_class_n(values: list[float], current: float) -> str:
+    # Reason: extends the original 2-system classifier to N systems so the
+    # cosine panel can be coloured the same way as graph and raw without
+    # touching the existing 2-way helper used elsewhere.
+    if not values:
+        return "neutral"
+    best = min(values)
+    worst = max(values)
+    if abs(best - worst) < 0.001:
+        return "neutral"
+    if abs(current - best) < 0.001:
+        return "winner"
+    return "loser"
+
+
 def _render_reference_list(result: dict[str, object]) -> str:
     selected = list(result.get("display_references", []))
     contexts = {
@@ -41,7 +56,7 @@ def _render_reference_list(result: dict[str, object]) -> str:
             "<li>"
             f"<code>{escape(item['reference_id'])}</code> "
             f"<strong>{escape(item['title'])}</strong>{locator}"
-            f"<div class='excerpt'>{escape(item['excerpt'])}</div>"
+            f"<div class='excerpt'>{escape(item['text'])}</div>"
             "</li>"
         )
     parts.append("</ul>")
@@ -61,7 +76,7 @@ def _render_context_details(result: dict[str, object]) -> str:
             f"<code>{escape(item['reference_id'])}</code> "
             f"<strong>{escape(item['title'])}</strong>{locator}"
             f"<span class='score'>score {float(item['score']):.4f}</span>"
-            f"<div class='excerpt'>{escape(item['excerpt'])}</div>"
+            f"<div class='excerpt'>{escape(item['text'])}</div>"
             "</li>"
         )
     parts.append("</ul></details>")
@@ -71,11 +86,10 @@ def _render_context_details(result: dict[str, object]) -> str:
 def _render_system_panel(
     label: str,
     result: dict[str, object],
-    graph_total_ms: float,
-    raw_total_ms: float,
+    all_total_ms: list[float],
 ) -> str:
     total_ms = float(result["total_ms"])
-    winner_class = _winner_class(graph_total_ms, raw_total_ms, total_ms)
+    winner_class = _winner_class_n(all_total_ms, total_ms)
     chip = "Faster" if winner_class == "winner" else "Slower" if winner_class == "loser" else "Tie"
     cited = ", ".join(f"[{ref}]" for ref in result.get("cited_references", []))
     inferred = ", ".join(f"[{ref}]" for ref in result.get("inferred_references", []))
@@ -104,13 +118,32 @@ def _render_system_panel(
     )
 
 
-def _render_case(graph_result: dict[str, object], raw_result: dict[str, object]) -> str:
+def _render_case(
+    graph_result: dict[str, object],
+    raw_result: dict[str, object],
+    cosine_result: dict[str, object] | None = None,
+) -> str:
     case_id = str(graph_result["case_id"])
     _, level = case_id.rsplit("-level-", 1)
     track = case_id.split("-")[0]
     graph_total_ms = float(graph_result["total_ms"])
     raw_total_ms = float(raw_result["total_ms"])
-    faster = "Graph" if graph_total_ms < raw_total_ms else "Raw" if raw_total_ms < graph_total_ms else "Tie"
+    cosine_total_ms = float(cosine_result["total_ms"]) if cosine_result else None
+    totals = [graph_total_ms, raw_total_ms]
+    if cosine_total_ms is not None:
+        totals.append(cosine_total_ms)
+    label_for = {
+        graph_total_ms: "Graph",
+        raw_total_ms: "Raw",
+    }
+    if cosine_total_ms is not None:
+        label_for[cosine_total_ms] = "Cosine"
+    faster = label_for[min(totals)] if len(set(totals)) > 1 else "Tie"
+    cosine_panel = (
+        _render_system_panel("Cosine Agent", cosine_result, totals)
+        if cosine_result is not None
+        else ""
+    )
     return (
         "<article class='question-card'>"
         f"<div class='question-meta'><span class='track'>{escape(TRACK_LABELS.get(track, track.title()))}</span>"
@@ -118,8 +151,9 @@ def _render_case(graph_result: dict[str, object], raw_result: dict[str, object])
         f"<span class='winner-banner'>{escape(faster)} faster</span></div>"
         f"<h3>{escape(str(graph_result['query']))}</h3>"
         "<div class='panels'>"
-        f"{_render_system_panel('Graph Agent', graph_result, graph_total_ms, raw_total_ms)}"
-        f"{_render_system_panel('Raw Agent', raw_result, graph_total_ms, raw_total_ms)}"
+        f"{_render_system_panel('Graph Agent', graph_result, totals)}"
+        f"{cosine_panel}"
+        f"{_render_system_panel('Raw Agent', raw_result, totals)}"
         "</div>"
         "</article>"
     )
@@ -128,11 +162,21 @@ def _render_case(graph_result: dict[str, object], raw_result: dict[str, object])
 def render_isolated_benchmark_report(payload: dict[str, object]) -> str:
     graph_results = {item["case_id"]: item for item in payload["graph"]["results"]}
     raw_results = {item["case_id"]: item for item in payload["raw"]["results"]}
+    cosine_payload = payload.get("cosine")
+    cosine_results = (
+        {item["case_id"]: item for item in cosine_payload["results"]}
+        if cosine_payload
+        else {}
+    )
 
     technical_cases = []
     science_cases = []
     for case_id in graph_results:
-        rendered = _render_case(graph_results[case_id], raw_results[case_id])
+        rendered = _render_case(
+            graph_results[case_id],
+            raw_results[case_id],
+            cosine_results.get(case_id),
+        )
         if case_id.startswith("technical-"):
             technical_cases.append(rendered)
         else:
@@ -246,7 +290,7 @@ def render_isolated_benchmark_report(payload: dict[str, object]) -> str:
     }}
     .panels {{
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 18px;
     }}
     .system-card {{
@@ -374,6 +418,11 @@ def render_isolated_benchmark_report(payload: dict[str, object]) -> str:
           <dt>Graph Avg</dt>
           <dd>{escape(_format_ms(payload['graph']['summary']['average_total_ms']))}</dd>
         </dl>
+        {(
+            "<dl class='summary-card'><dt>Cosine Avg</dt><dd>"
+            + escape(_format_ms(cosine_payload['summary']['average_total_ms']))
+            + "</dd></dl>"
+        ) if cosine_payload else ""}
         <dl class="summary-card">
           <dt>Raw Avg</dt>
           <dd>{escape(_format_ms(payload['raw']['summary']['average_total_ms']))}</dd>
@@ -382,6 +431,11 @@ def render_isolated_benchmark_report(payload: dict[str, object]) -> str:
           <dt>Graph Context</dt>
           <dd>{payload['graph']['summary']['average_context_tokens']} tok</dd>
         </dl>
+        {(
+            "<dl class='summary-card'><dt>Cosine Context</dt><dd>"
+            + str(cosine_payload['summary']['average_context_tokens'])
+            + " tok</dd></dl>"
+        ) if cosine_payload else ""}
         <dl class="summary-card">
           <dt>Raw Context</dt>
           <dd>{payload['raw']['summary']['average_context_tokens']} tok</dd>

@@ -15,6 +15,10 @@ wheels/
 # Benchmark artifacts
 reports/
 benchmark_corpus/raw_articles/
+.benchmark-cache/
 
 # OS files
 .DS_Store
+
+# Local secrets
+.env
