@@ -19,7 +19,7 @@ def _config_path(root: Path) -> Path:
     return root / APP_DIR_NAME / CONFIG_FILENAME
 
 
-CURRENT_CONFIG_VERSION = 6
+CURRENT_CONFIG_VERSION = 7
 LEGACY_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 LEGACY_DEFAULT_DIMENSIONS = 384
 DEFAULT_MODEL = "snowflake/snowflake-arctic-embed-m"
@@ -36,6 +36,7 @@ class MemoryConfig:
     stored_embedding_backend: str | None = None
     stored_embedding_model: str | None = None
     stored_embedding_dimensions: int | None = None
+    integration_version: str | None = None
     max_memory_words: int = DEFAULT_MAX_MEMORY_WORDS
     duplicate_threshold: float = 0.97
     overlap_threshold: float = 0.90
@@ -96,6 +97,7 @@ class MemoryConfig:
         data.setdefault("stored_embedding_backend", original_backend)
         data.setdefault("stored_embedding_model", original_model)
         data.setdefault("stored_embedding_dimensions", original_dimensions)
+        data.setdefault("integration_version", None)
 
         if version < CURRENT_CONFIG_VERSION:
             if (
@@ -108,6 +110,8 @@ class MemoryConfig:
             max_words = int(data.get("max_memory_words", 1000))
             if max_words in (1000, 200):
                 data["max_memory_words"] = DEFAULT_MAX_MEMORY_WORDS
+            if "integration_version" not in data:
+                data["integration_version"] = None
             data["version"] = CURRENT_CONFIG_VERSION
 
         return cls(**data)

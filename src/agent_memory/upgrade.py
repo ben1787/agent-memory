@@ -23,6 +23,7 @@ import json
 import os
 import platform
 import shutil
+import tarfile
 import sys
 import tempfile
 import time
@@ -59,15 +60,15 @@ def _detect_asset_name() -> str | None:
     machine = platform.machine().lower()
     if system == "Darwin":
         if machine in ("arm64", "aarch64"):
-            return "agent-memory-macos-arm64"
+            return "agent-memory-macos-arm64.tar.gz"
         # Intel macOS is not built in the release matrix (GitHub retired the
         # free macos-13 runner). Fall through to None — the upgrade command
         # will report no matching asset.
     elif system == "Linux":
         if machine in ("x86_64", "amd64"):
-            return "agent-memory-linux-x86_64"
+            return "agent-memory-linux-x86_64.tar.gz"
         if machine in ("arm64", "aarch64"):
-            return "agent-memory-linux-arm64"
+            return "agent-memory-linux-arm64.tar.gz"
     elif system == "Windows":
         if machine in ("x86_64", "amd64"):
             return "agent-memory-windows-x86_64.exe"
@@ -214,7 +215,7 @@ def perform_upgrade(*, repo: str = DEFAULT_REPO) -> dict[str, Any]:
             ),
         }
 
-    # Download binary + checksum into a tempdir, verify, atomic move.
+    # Download asset + checksum into a tempdir, verify, and install.
     tmpdir = Path(tempfile.mkdtemp(prefix="agent-memory-upgrade."))
     try:
         new_binary = tmpdir / asset
@@ -240,19 +241,14 @@ def perform_upgrade(*, repo: str = DEFAULT_REPO) -> dict[str, Any]:
                 ),
             }
 
-        # Atomic replace. On Windows, the running binary may be locked; we
-        # work around it by writing the new binary alongside and renaming.
-        try:
-            new_binary.chmod(0o755)
-            shutil.move(str(new_binary), str(target_path))
-        except OSError as exc:
-            return {
-                "status": "error",
-                "details": (
-                    f"Failed to install new binary at {target_path}: {exc}. "
-                    f"You may need elevated permissions, or to remove the existing binary first."
-                ),
-            }
+        install_error = None
+        if asset.endswith(".tar.gz"):
+            install_error = _install_from_tarball(new_binary, target_path)
+        else:
+            install_error = _install_from_binary(new_binary, target_path)
+
+        if install_error is not None:
+            return install_error
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -271,6 +267,75 @@ def perform_upgrade(*, repo: str = DEFAULT_REPO) -> dict[str, Any]:
         "binary_path": str(target_path),
         "details": f"Upgraded agent-memory from {__display_version__} to {latest.tag}.",
     }
+
+
+def _install_from_binary(new_binary: Path, target_path: Path) -> dict[str, Any] | None:
+    try:
+        new_binary.chmod(0o755)
+        shutil.move(str(new_binary), str(target_path))
+    except OSError as exc:
+        return {
+            "status": "error",
+            "details": (
+                f"Failed to install new binary at {target_path}: {exc}. "
+                f"You may need elevated permissions, or to remove the existing binary first."
+            ),
+        }
+    return None
+
+
+def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
+    for member in tar.getmembers():
+        member_path = destination / member.name
+        if not str(member_path.resolve()).startswith(str(destination.resolve())):
+            raise ValueError("Tarball contains unsafe paths.")
+    tar.extractall(destination)
+
+
+def _install_from_tarball(archive: Path, target_path: Path) -> dict[str, Any] | None:
+    extract_root = archive.parent / "extracted"
+    extract_root.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            _safe_extract_tar(tar, extract_root)
+    except (tarfile.TarError, OSError, ValueError) as exc:
+        return {
+            "status": "error",
+            "details": f"Failed to unpack {archive.name}: {exc}",
+        }
+
+    candidate_root = extract_root / "agent-memory"
+    if not candidate_root.exists():
+        entries = [entry for entry in extract_root.iterdir() if entry.is_dir()]
+        if len(entries) == 1:
+            candidate_root = entries[0]
+    binary_path = candidate_root / "agent-memory"
+    if not binary_path.exists():
+        return {
+            "status": "error",
+            "details": f"Archive {archive.name} did not contain agent-memory binary.",
+        }
+
+    target_dir = target_path.parent
+    internal_target = target_dir / "_internal"
+    internal_source = candidate_root / "_internal"
+
+    try:
+        binary_path.chmod(0o755)
+        shutil.move(str(binary_path), str(target_path))
+        if internal_source.exists():
+            if internal_target.exists():
+                shutil.rmtree(internal_target)
+            shutil.move(str(internal_source), str(internal_target))
+    except OSError as exc:
+        return {
+            "status": "error",
+            "details": (
+                f"Failed to install agent-memory bundle at {target_dir}: {exc}. "
+                f"You may need elevated permissions, or to remove the existing binary first."
+            ),
+        }
+    return None
 
 
 def _resolve_running_binary_path() -> Path | None:

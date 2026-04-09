@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 from agent_memory.config import MemoryConfig
 from agent_memory.embeddings import Embedder, build_embedder
-from agent_memory.engine import AgentMemory
+from agent_memory.engine import AgentMemory, truncate_to_words, word_count
 
 
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
@@ -399,7 +399,10 @@ def run_benchmark_on_corpus(
         for title, paragraphs in corpus.items():
             titles.append(title)
             for paragraph in paragraphs:
-                memory.save(paragraph)
+                resolved_paragraph = paragraph
+                if word_count(resolved_paragraph) > config.max_memory_words:
+                    resolved_paragraph = truncate_to_words(resolved_paragraph, config.max_memory_words)
+                memory.save(resolved_paragraph)
                 paragraph_count += 1
 
         stats = memory.stats().to_dict()

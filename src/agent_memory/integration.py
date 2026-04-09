@@ -1434,3 +1434,96 @@ def uninstall_memory_instructions(project_root: Path) -> list[IntegrationResult]
             )
         )
     return results
+
+
+def _payload_contains_agent_memory_hook(payload: dict[str, object]) -> bool:
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list):
+                continue
+            for handler in handlers:
+                if not isinstance(handler, dict):
+                    continue
+                command = handler.get("command")
+                if not isinstance(command, str):
+                    continue
+                if "agent-memory" in command or "agent_memory.hooks" in command:
+                    return True
+    return False
+
+
+def _claude_has_agent_memory_hooks(project_root: Path) -> bool:
+    settings_path = project_root / ".claude" / CLAUDE_SETTINGS_LOCAL_FILENAME
+    if not settings_path.exists():
+        return False
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return _payload_contains_agent_memory_hook(payload)
+
+
+def _codex_has_agent_memory_hooks(project_root: Path) -> bool:
+    hooks_path = project_root / ".codex" / CODEX_HOOKS_FILENAME
+    if not hooks_path.exists():
+        return False
+    try:
+        payload = json.loads(hooks_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return _payload_contains_agent_memory_hook(payload)
+
+
+def _instructions_marker_present(project_root: Path) -> bool:
+    for filename in INSTRUCTIONS_FILENAMES:
+        path = project_root / filename
+        if not path.exists():
+            continue
+        try:
+            contents = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if INSTRUCTIONS_BEGIN_MARKER in contents:
+            return True
+    return False
+
+
+def refresh_project_integration(project: ProjectContext, *, current_version: str) -> None:
+    """Refresh hooks/instructions when the running binary version changes.
+
+    Only touches integrations that are already present (agent-memory hooks or
+    instruction markers). Always updates the stored integration version so the
+    refresh runs once per binary version.
+    """
+    if project.config.integration_version == current_version:
+        return
+
+    has_claude = _claude_has_agent_memory_hooks(project.root)
+    has_codex = _codex_has_agent_memory_hooks(project.root)
+    has_instructions = _instructions_marker_present(project.root)
+
+    if has_claude:
+        install_claude_hooks(project.root, register_mcp_server=False)
+    if has_codex:
+        install_codex_hooks(project.root)
+    if has_instructions:
+        install_memory_instructions(project.root)
+
+    project.config.integration_version = current_version
+    project.config_path.write_text(
+        json.dumps(project.config.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+from agent_memory.config import ProjectContext

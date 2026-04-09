@@ -80,6 +80,20 @@ app = typer.Typer(
 )
 
 
+def _refresh_project_integration_if_needed() -> None:
+    try:
+        project = load_project(Path.cwd())
+    except ConfigError:
+        return
+    try:
+        from agent_memory.integration import refresh_project_integration
+
+        refresh_project_integration(project, current_version=__display_version__)
+    except Exception:
+        # Never fail a real command because integration refresh failed.
+        pass
+
+
 @app.callback()
 def _main_callback(
     version: bool = typer.Option(
@@ -104,6 +118,7 @@ def _main_callback(
     except Exception:
         # Never fail a real command because the staleness check threw.
         pass
+    _refresh_project_integration_if_needed()
 
 
 # Internal hook dispatch group: used by .codex/hooks.json and .claude/settings.local.json

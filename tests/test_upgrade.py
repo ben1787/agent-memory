@@ -29,13 +29,13 @@ def test_detect_asset_name_returns_none_on_unsupported_platform(monkeypatch) -> 
 def test_detect_asset_name_macos_arm64(monkeypatch) -> None:
     monkeypatch.setattr(upgrade.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(upgrade.platform, "machine", lambda: "arm64")
-    assert upgrade._detect_asset_name() == "agent-memory-macos-arm64"
+    assert upgrade._detect_asset_name() == "agent-memory-macos-arm64.tar.gz"
 
 
 def test_detect_asset_name_linux_x86(monkeypatch) -> None:
     monkeypatch.setattr(upgrade.platform, "system", lambda: "Linux")
     monkeypatch.setattr(upgrade.platform, "machine", lambda: "x86_64")
-    assert upgrade._detect_asset_name() == "agent-memory-linux-x86_64"
+    assert upgrade._detect_asset_name() == "agent-memory-linux-x86_64.tar.gz"
 
 
 def test_check_for_upgrade_uses_cache_when_fresh(tmp_path, monkeypatch) -> None:
@@ -101,7 +101,7 @@ def test_perform_upgrade_reports_up_to_date(monkeypatch) -> None:
         asset_sha_url="",
     )
     monkeypatch.setattr(upgrade, "_resolve_latest_release", lambda repo=upgrade.DEFAULT_REPO: fake_latest)
-    monkeypatch.setattr(upgrade, "_detect_asset_name", lambda: "agent-memory-macos-arm64")
+    monkeypatch.setattr(upgrade, "_detect_asset_name", lambda: "agent-memory-macos-arm64.tar.gz")
 
     result = upgrade.perform_upgrade()
 
@@ -117,7 +117,7 @@ def test_perform_upgrade_reports_unsupported_platform(monkeypatch) -> None:
 
 
 def test_perform_upgrade_reports_api_failure(monkeypatch) -> None:
-    monkeypatch.setattr(upgrade, "_detect_asset_name", lambda: "agent-memory-macos-arm64")
+    monkeypatch.setattr(upgrade, "_detect_asset_name", lambda: "agent-memory-macos-arm64.tar.gz")
     monkeypatch.setattr(upgrade, "_resolve_latest_release", lambda repo=upgrade.DEFAULT_REPO: None)
     result = upgrade.perform_upgrade()
     assert result["status"] == "error"
