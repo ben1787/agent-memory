@@ -5,7 +5,10 @@ import os
 import sys
 import traceback
 
+import re
+
 from agent_memory.hooks.common import (
+    load_memory_config,
     log_hook_event,
     pending_consolidation_instruction,
     project_root_from_env_or_cwd,
@@ -16,12 +19,53 @@ from agent_memory.hooks.common import (
 )
 
 
-INSTRUCTION = """Agent Memory:
-- If the answer is not already clear from the current context or code, consider a quick `agent-memory recall <task-shaped query>` before broader research. Phrase the query like the answer would, not like a question.
-- After the work, decide whether you learned 0-3 durable things future-you would want without re-reading this conversation. If yes, save them with `agent-memory save "<memory>" "<memory>"`. For memories with quotes/newlines, pipe via `agent-memory save --stdin`.
-- Save only stable, useful project knowledge: decisions and the *why*, file locations, gotchas, user preferences, cross-component relationships, external system pointers.
-- Do not save noise, generic programming knowledge, transcript dumps, or anything already in AGENTS.md/CLAUDE.md.
-- If you saved something wrong: `agent-memory list --recent 5` to find the id, then `agent-memory edit <id> "<corrected>"` to fix or `agent-memory delete <id> --yes` to remove. `agent-memory undo` reverts the most recent save/edit/delete."""
+INSTRUCTION_FULL = """Agent Memory
+
+Storing memories:
+  Save only durable, repo-specific facts that will materially speed up future work or prevent likely mistakes.
+  Save only if at least 2:
+    - Likely to matter again
+    - Hard to rediscover quickly
+    - Changes tools/files/search path
+    - Missing it wastes time or causes bad assumptions
+    - Stable beyond this session
+  Prefer: workflow rules, architecture map, search shortcuts, environment quirks, external system behavior, validation/release constraints, recurring customer/project facts.
+  Do not save: temp branch/PR/test state, logs/transcripts, generic advice, grep-easy facts, speculation, soon-changing details.
+  Format: Scope + Category; 1-sentence fact; 1-sentence why; optional exception; confidence high/med/low.
+  Worthiness test: if it won’t save time, prevent a likely error, or narrow the search path, don’t save.
+  After work, save memories if the criteria are met with `agent-memory save "<memory>" "<memory>"`. Use `--stdin` for quotes/newlines.
+  If you saved something wrong: use `list --recent 5`, then `edit`/`delete`, or `undo`.
+
+Reading memories:
+  - If the answer isn’t clear from context or code, consider `agent-memory recall <task-shaped query>` before manual searching through files or the internet."""
+
+INSTRUCTION_BRIEF = """Agent Memory
+
+Storing memories:
+  Consider saving memories when appropriate; follow the detailed guidelines and keep them durable, repo-specific, and concise.
+
+Reading memories:
+  If the answer isn’t clear from context or code, consider `agent-memory recall <task-shaped query>` before manual searching through files or the internet."""
+
+DEFAULT_CONTEXT_INTERVAL = 10
+
+
+def _parse_turn_id(raw: object) -> int | None:
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        match = re.search(r"\d+", raw)
+        if match:
+            return int(match.group())
+    return None
+
+
+def _should_inject_full(turn_id: int | None, interval: int) -> bool:
+    if interval <= 1:
+        return True
+    if turn_id is None:
+        return True
+    return (turn_id - 1) % interval == 0
 
 
 def main() -> None:
@@ -40,7 +84,13 @@ def main() -> None:
             action="start",
             payload=hook_summary,
         )
-        additional_context = INSTRUCTION
+        config = load_memory_config(project_root)
+        interval = DEFAULT_CONTEXT_INTERVAL
+        if config is not None:
+            interval = max(1, int(getattr(config, "prompt_context_turn_interval", DEFAULT_CONTEXT_INTERVAL)))
+
+        turn_id = _parse_turn_id(payload.get("turn_id"))
+        additional_context = INSTRUCTION_FULL if _should_inject_full(turn_id, interval) else INSTRUCTION_BRIEF
         consolidation_instruction = pending_consolidation_instruction(project_root)
         if consolidation_instruction:
             additional_context = f"{additional_context}\n\n{consolidation_instruction}"

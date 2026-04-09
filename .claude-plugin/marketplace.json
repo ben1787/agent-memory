@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Claude Code plugins for installing and using Agent Memory.",
-    "version": "0.2.2"
+    "version": "0.2.3"
   },
   "plugins": [
     {
       "name": "agent-memory",
       "source": "./plugins/agent-memory",
       "description": "Installs the agent-memory CLI inside Claude Code and adds setup and debugging skills for persistent project memory.",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "author": {
         "name": "Ben",
         "email": "ben@equitydatascience.com"

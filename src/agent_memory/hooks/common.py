@@ -228,6 +228,21 @@ def sync_prompt_artifacts(project_root: Path) -> None:
         pass
 
 
+def load_memory_config(project_root: Path) -> "MemoryConfig | None":
+    config_path = project_root / ".agent-memory" / "config.json"
+    if not config_path.exists():
+        return None
+    try:
+        from agent_memory.config import MemoryConfig
+
+        raw = json.loads(config_path.read_text(encoding='utf-8'))
+        if not isinstance(raw, dict):
+            return None
+        return MemoryConfig.from_dict(raw)
+    except Exception:
+        return None
+
+
 def truncate_words(text: str, limit: int) -> str:
     cleaned = " ".join(text.split())
     if not cleaned:
