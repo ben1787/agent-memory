@@ -250,6 +250,7 @@ class AgentMemory:
         if project.config.needs_reembed():
             reembed_project(project.root, embedder=embedder, exact=True)
             project = load_project(project.root, exact=True)
+        refresh_project_integration(project, current_version=__display_version__)
         return cls(project, embedder=embedder, read_only=read_only)
 
     @classmethod
@@ -1286,3 +1287,5 @@ def open_memory_with_retry(
             time.sleep(delay_s * (attempt + 1))
     assert last_error is not None
     raise last_error
+from agent_memory import __display_version__
+from agent_memory.integration import refresh_project_integration
