@@ -9,13 +9,13 @@ Use this skill for the daily Agent Memory consolidation pass.
 
 ## Workflow
 
-1. Inspect the current mode:
+1. Inspect the current status:
 
 ```bash
 agent-memory consolidation-status --json
 ```
 
-2. If the mode is still `dry_run`, start the review:
+2. Start the review:
 
 ```bash
 agent-memory consolidation-start --json
@@ -35,26 +35,9 @@ Rules:
 - Contradiction resolution and timestamp-based truth arbitration are out of scope for this pass.
 - If a cluster already looks appropriately distinct, leave it alone.
 - If a cluster is redundant or noisy, replace it with fewer, more orthogonal memories.
-- During `dry_run`, do not mutate the memory store.
+5. Decide whether to keep each cluster or replace it with fewer, more orthogonal memories.
 
-5. In `dry_run`, produce a proposal instead of running changes.
-
-Your proposal should say:
-- which clusters you would leave alone
-- which memory IDs you would delete
-- which memory IDs you would edit
-- which new memories you would save
-- what you expect the resulting memory set to look like
-
-Wait for explicit approval before applying any edits.
-
-6. After approval, flip the run into apply mode:
-
-```bash
-agent-memory consolidation-approve --json
-```
-
-7. Then carry out the approved changes with the existing CLI tools:
+6. Apply the changes immediately with the existing CLI tools:
 
 ```bash
 agent-memory show <memory_id> --json
@@ -63,9 +46,9 @@ agent-memory delete <memory_id> --yes
 agent-memory save "<new memory>"
 ```
 
-8. Prefer preserving useful facts over aggressive deletion.
+7. Prefer preserving useful facts over aggressive deletion.
 
-9. When you are done applying the approved plan, mark the run complete:
+8. When you are done applying the plan, mark the run complete:
 
 ```bash
 agent-memory consolidation-complete --json
@@ -75,5 +58,4 @@ agent-memory consolidation-complete --json
 
 - Summarize which clusters you reviewed.
 - Say which memories you left unchanged.
-- In `dry_run`, list the proposed changes only and say approval is required.
-- In apply mode, list the affected memory IDs and the new memories you created.
+- List the affected memory IDs and the new memories you created.

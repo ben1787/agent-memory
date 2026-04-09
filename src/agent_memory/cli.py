@@ -52,7 +52,6 @@ from agent_memory.repo_ingest import import_repo_corpus
 # Windows, where the module cannot be imported at all.
 from agent_memory.store import GraphStore
 from agent_memory.hooks.common import (
-    approve_consolidation_apply,
     consolidation_status,
     hook_log_entries,
     mark_consolidation_completed,
@@ -1175,23 +1174,6 @@ def consolidation_complete(
     as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
     payload = mark_consolidation_completed(load_project(cwd, exact=is_project_root(cwd)).root)
-    _emit(payload, as_json)
-
-
-@app.command(
-    "consolidation-approve",
-    help="Approve today's dry-run memory consolidation plan so the host LLM can apply the changes."
-)
-def consolidation_approve(
-    cwd: Path = typer.Option(
-        Path("."),
-        "--cwd",
-        help="Project directory or any path inside the project.",
-        resolve_path=True,
-    ),
-    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
-) -> None:
-    payload = approve_consolidation_apply(load_project(cwd, exact=is_project_root(cwd)).root)
     _emit(payload, as_json)
 
 

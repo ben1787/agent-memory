@@ -8,7 +8,6 @@ from mcp.server.fastmcp import FastMCP
 from agent_memory.config import ConfigError, MemoryConfig, load_project
 from agent_memory.engine import AgentMemory, open_memory_with_retry
 from agent_memory.hooks.common import (
-    approve_consolidation_apply,
     consolidation_status,
     mark_consolidation_completed,
     mark_consolidation_started,
@@ -119,14 +118,6 @@ def build_server(default_project_root: Path | None = None) -> FastMCP:
         if root is None:
             raise ConfigError("A project root is required to complete memory consolidation.")
         return mark_consolidation_completed(root)
-
-    @server.tool()
-    def approve_memory_consolidation(project_root: str | None = None) -> dict[str, object]:
-        """Approve today's dry-run memory consolidation plan so the host LLM can apply the changes."""
-        root = _resolve_project_root(project_root) or project_hint
-        if root is None:
-            raise ConfigError("A project root is required to approve memory consolidation.")
-        return approve_consolidation_apply(root)
 
     @server.tool()
     def memory_stats(project_root: str | None = None) -> dict[str, object]:

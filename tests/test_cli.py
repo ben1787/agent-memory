@@ -465,23 +465,12 @@ def test_consolidation_status_start_and_complete_commands(tmp_path: Path) -> Non
     assert initial.exit_code == 0, initial.stdout
     initial_payload = json.loads(initial.stdout)
     assert initial_payload["is_pending_today"] is False
-    assert initial_payload["execution_mode"] == "dry_run"
-    assert initial_payload["requires_approval"] is False
 
     started = runner.invoke(app, ["consolidation-start", "--cwd", str(tmp_path), "--json"])
     assert started.exit_code == 0, started.stdout
     started_payload = json.loads(started.stdout)
     assert started_payload["status"] == "started"
     assert started_payload["is_in_progress_today"] is True
-    assert started_payload["execution_mode"] == "dry_run"
-
-    approved = runner.invoke(app, ["consolidation-approve", "--cwd", str(tmp_path), "--json"])
-    assert approved.exit_code == 0, approved.stdout
-    approved_payload = json.loads(approved.stdout)
-    assert approved_payload["status"] == "approved"
-    assert approved_payload["execution_mode"] == "apply"
-    assert approved_payload["is_approved_today"] is True
-    assert approved_payload["requires_approval"] is False
 
     completed = runner.invoke(app, ["consolidation-complete", "--cwd", str(tmp_path), "--json"])
     assert completed.exit_code == 0, completed.stdout

@@ -17,11 +17,8 @@ _DEFAULT_CONSOLIDATION_STATE: dict[str, Any] = {
     "pending_for_date": None,
     "in_progress_for_date": None,
     "completed_for_date": None,
-    "approved_for_date": None,
-    "execution_mode": "dry_run",
     "last_scheduled_at": None,
     "last_started_at": None,
-    "last_approved_at": None,
     "last_completed_at": None,
 }
 
@@ -88,8 +85,6 @@ def consolidation_status(project_root: Path) -> dict[str, Any]:
         "is_pending_today": is_pending_today,
         "is_in_progress_today": is_in_progress_today,
         "is_completed_today": is_completed_today,
-        "is_approved_today": state.get("approved_for_date") == today,
-        "requires_approval": (is_pending_today or is_in_progress_today) and state.get("execution_mode") != "apply",
     }
 
 
@@ -103,8 +98,6 @@ def schedule_daily_consolidation(project_root: Path) -> dict[str, Any]:
         and state.get("completed_for_date") != today
     ):
         state["pending_for_date"] = today
-        state["approved_for_date"] = None
-        state["execution_mode"] = "dry_run"
         state["last_scheduled_at"] = _utc_now()
         scheduled = True
         write_consolidation_state(project_root, state)
@@ -132,25 +125,6 @@ def mark_consolidation_started(project_root: Path) -> dict[str, Any]:
     }
 
 
-def approve_consolidation_apply(project_root: Path) -> dict[str, Any]:
-    state = read_consolidation_state(project_root)
-    today = _local_today()
-    if state.get("completed_for_date") == today:
-        return {
-            "status": "already_completed",
-            **consolidation_status(project_root),
-        }
-    state["pending_for_date"] = today
-    state["approved_for_date"] = today
-    state["execution_mode"] = "apply"
-    state["last_approved_at"] = _utc_now()
-    write_consolidation_state(project_root, state)
-    return {
-        "status": "approved",
-        **consolidation_status(project_root),
-    }
-
-
 def mark_consolidation_completed(project_root: Path) -> dict[str, Any]:
     state = read_consolidation_state(project_root)
     today = _local_today()
@@ -171,17 +145,6 @@ def pending_consolidation_instruction(project_root: Path) -> str | None:
         return None
     if not status["is_pending_today"] and not status["is_in_progress_today"]:
         return None
-    if status["execution_mode"] == "apply":
-        return (
-            "Daily memory consolidation for this project has been approved for application.\n"
-            "- If your client exposes the Agent Memory consolidation skill, use it now. "
-            "In Claude plugin setups, that skill is `/agent-memory:consolidate`.\n"
-            "- If your client supports delegation, you may run the consolidation skill in a subagent.\n"
-            "- If you have not started yet, run `agent-memory consolidation-start`.\n"
-            "- Inspect `agent-memory consolidate --json` and then apply the approved cleanup using "
-            "`agent-memory delete`, `agent-memory edit`, and `agent-memory save`.\n"
-            "- When the approved changes are done, run `agent-memory consolidation-complete`."
-        )
     return (
         "Daily memory consolidation is due for this project.\n"
         "- If your client exposes the Agent Memory consolidation skill, use it now. "
@@ -190,15 +153,10 @@ def pending_consolidation_instruction(project_root: Path) -> str | None:
         "- Start the workflow with `agent-memory consolidation-start`.\n"
         "- Inspect `agent-memory consolidate --json`, which reports overlapping similarity clusters at cosine "
         "similarity >= 0.92.\n"
-        "- This run is in dry-run mode during testing. Do not mutate memories yet.\n"
-        "- For each cluster, decide whether to keep it as-is or propose replacing it with fewer, more orthogonal "
-        "memories.\n"
-        "- Report the proposed `agent-memory delete`, `agent-memory edit`, and `agent-memory save` actions and "
-        "their expected results, but do not run them until approved.\n"
-        "- If the user approves the proposed changes, run `agent-memory consolidation-approve` and then carry out "
-        "the approved edits.\n"
+        "- For each cluster, decide whether to keep it as-is or replace it with fewer, more orthogonal memories.\n"
+        "- Apply the chosen `agent-memory delete`, `agent-memory edit`, and `agent-memory save` actions directly.\n"
         "- Do not do contradiction resolution or timestamp-based truth arbitration in this pass.\n"
-        "- After the eventual approved apply pass, run `agent-memory consolidation-complete`."
+        "- After the edits, run `agent-memory consolidation-complete`."
     )
 
 

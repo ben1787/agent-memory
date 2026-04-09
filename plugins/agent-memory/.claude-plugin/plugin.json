@@ -1,7 +1,7 @@
 {
   "name": "agent-memory",
   "description": "Plugin-managed installation of agent-memory for Claude Code, plus setup and doctor skills for project memory.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "author": {
     "name": "Ben",
     "email": "ben@equitydatascience.com"
