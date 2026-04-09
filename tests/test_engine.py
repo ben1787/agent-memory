@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_memory.config import MemoryConfig, init_project
-from agent_memory.engine import AgentMemory, open_memory_with_retry
+from agent_memory.config import MemoryConfig, init_project, load_project
+from agent_memory.embeddings import FastembedCachePruneResult
+from agent_memory.engine import AgentMemory, open_memory_with_retry, reembed_project
 from agent_memory.query_log import QUERY_LOG_FILENAME
 
 
@@ -81,6 +82,244 @@ def test_recall_cosine_rejects_empty_query_and_bad_limit(tmp_path: Path) -> None
         memory.close()
 
 
+def test_recall_to_dict_returns_query_rooted_nodes(tmp_path: Path) -> None:
+    config = MemoryConfig(embedding_backend="hash")
+    project = init_project(tmp_path, config=config)
+
+    class FixedEmbedder:
+        dimensions = config.embedding_dimensions
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_text(text) for text in texts]
+
+        def embed_text(self, text: str) -> list[float]:
+            if text == "billing webhook handler":
+                return _pad([1.0, 0.0])
+            raise AssertionError(f"Unexpected embed_text call for {text!r}")
+
+    def _pad(values: list[float]) -> list[float]:
+        return values + [0.0] * (config.embedding_dimensions - len(values))
+
+    memory = AgentMemory(project, embedder=FixedEmbedder())
+    try:
+        memory.save("Primary billing memory.", embedding=_pad([0.9, 0.435889894]))
+        memory.save("Related webhook memory.", embedding=_pad([0.8, 0.6]))
+        payload = memory.recall("billing webhook handler", limit=2).to_dict()
+    finally:
+        memory.close()
+
+    assert payload["query"] == "billing webhook handler"
+    assert [node["alias"] for node in payload["nodes"]] == ["A", "B"]
+    assert payload["nodes"][0]["source"] == "QUERY"
+    assert payload["nodes"][0]["text"] == "Primary billing memory."
+    assert payload["nodes"][1]["source"] == "A"
+    assert payload["nodes"][1]["text"] == "Related webhook memory."
+    assert payload["nodes"][1]["source_similarity"] == pytest.approx(0.9815, abs=1e-4)
+
+
+def test_load_project_migrates_legacy_default_config(tmp_path: Path) -> None:
+    app_dir = tmp_path / ".agent-memory"
+    app_dir.mkdir()
+    config_path = app_dir / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "embedding_backend": "fastembed",
+                "embedding_model": "BAAI/bge-small-en-v1.5",
+                "embedding_dimensions": 384,
+                "max_memory_words": 1000,
+                "duplicate_threshold": 0.97,
+                "overlap_threshold": 0.9,
+                "lexical_duplicate_threshold": 0.95,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (app_dir / "instructions.md").write_text("instructions\n", encoding="utf-8")
+
+    project = load_project(tmp_path, exact=True)
+
+    assert project.config.embedding_model == "snowflake/snowflake-arctic-embed-m"
+    assert project.config.embedding_dimensions == 768
+    assert project.config.max_memory_words == 250
+    assert project.config.stored_embedding_model == "BAAI/bge-small-en-v1.5"
+    assert project.config.stored_embedding_dimensions == 384
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["version"] == 6
+    assert persisted["embedding_model"] == "snowflake/snowflake-arctic-embed-m"
+    assert persisted["stored_embedding_model"] == "BAAI/bge-small-en-v1.5"
+
+
+def test_save_and_recall_use_document_and_query_embeddings_when_available(tmp_path: Path) -> None:
+    config = MemoryConfig(embedding_backend="hash", embedding_dimensions=2)
+    project = init_project(tmp_path, config=config)
+
+    class RoutedEmbedder:
+        dimensions = 2
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            raise AssertionError("generic embed_texts should not be used")
+
+        def embed_text(self, text: str) -> list[float]:
+            raise AssertionError("generic embed_text should not be used")
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_document(text) for text in texts]
+
+        def embed_document(self, text: str) -> list[float]:
+            if text == "alpha memory":
+                return [1.0, 0.0]
+            if text == "beta memory":
+                return [0.0, 1.0]
+            raise AssertionError(f"Unexpected document {text!r}")
+
+        def embed_queries(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_query(text) for text in texts]
+
+        def embed_query(self, text: str) -> list[float]:
+            if text == "alpha":
+                return [1.0, 0.0]
+            raise AssertionError(f"Unexpected query {text!r}")
+
+    memory = AgentMemory(project, embedder=RoutedEmbedder())
+    try:
+        memory.save("alpha memory")
+        memory.save("beta memory")
+        payload = memory.recall("alpha", limit=1).to_dict()
+    finally:
+        memory.close()
+
+    assert payload["nodes"][0]["text"] == "alpha memory"
+
+
+def test_open_memory_auto_reembeds_store_when_embedding_signature_changes(tmp_path: Path) -> None:
+    legacy_config = MemoryConfig(
+        version=4,
+        embedding_backend="hash",
+        embedding_model="hash-legacy",
+        embedding_dimensions=2,
+        max_memory_words=1000,
+        stored_embedding_backend="hash",
+        stored_embedding_model="hash-legacy",
+        stored_embedding_dimensions=2,
+    )
+    project = init_project(tmp_path, config=legacy_config)
+    memory = AgentMemory(project)
+    try:
+        memory.save("alpha memory")
+        memory.save("beta memory")
+    finally:
+        memory.close()
+
+    migrated_config = MemoryConfig(
+        embedding_backend="hash",
+        embedding_model="hash-v2",
+        embedding_dimensions=8,
+        stored_embedding_backend="hash",
+        stored_embedding_model="hash-legacy",
+        stored_embedding_dimensions=2,
+        max_memory_words=250,
+    )
+    (tmp_path / ".agent-memory" / "config.json").write_text(
+        json.dumps(migrated_config.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    reopened = open_memory_with_retry(tmp_path)
+    try:
+        records = reopened.list_all()
+        assert len(records) == 2
+        assert all(len(record.embedding) == 8 for record in records)
+        assert reopened.project.config.needs_reembed() is False
+        assert reopened.project.config.stored_embedding_dimensions == 8
+        result = reopened.recall("alpha", limit=1).to_dict()
+    finally:
+        reopened.close()
+
+    assert result["nodes"][0]["text"] == "alpha memory"
+
+
+def test_reembed_project_prunes_previous_fastembed_cache(monkeypatch, tmp_path: Path) -> None:
+    legacy_config = MemoryConfig(
+        version=4,
+        embedding_backend="hash",
+        embedding_model="hash-legacy",
+        embedding_dimensions=2,
+        max_memory_words=1000,
+        stored_embedding_backend="hash",
+        stored_embedding_model="hash-legacy",
+        stored_embedding_dimensions=2,
+    )
+    project = init_project(tmp_path, config=legacy_config)
+    memory = AgentMemory(project)
+    try:
+        memory.save("alpha memory")
+    finally:
+        memory.close()
+
+    migrated_config = MemoryConfig(
+        embedding_backend="fastembed",
+        embedding_model="snowflake/snowflake-arctic-embed-m",
+        embedding_dimensions=8,
+        stored_embedding_backend="hash",
+        stored_embedding_model="hash-legacy",
+        stored_embedding_dimensions=2,
+        max_memory_words=250,
+    )
+    (tmp_path / ".agent-memory" / "config.json").write_text(
+        json.dumps(migrated_config.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    seen: dict[str, object] = {}
+
+    def fake_prune(keep_model_names: list[str], *, cache_dir: str | None = None) -> FastembedCachePruneResult:
+        seen["keep_model_names"] = keep_model_names
+        return FastembedCachePruneResult(
+            cache_dir=tmp_path / "cache",
+            kept_models=keep_model_names,
+            pruned=[],
+        )
+
+    monkeypatch.setattr("agent_memory.engine.prune_fastembed_model_cache", fake_prune)
+
+    class ReembedEmbedder:
+        dimensions = 8
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_document(text) for text in texts]
+
+        def embed_text(self, text: str) -> list[float]:
+            return self.embed_document(text)
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_document(text) for text in texts]
+
+        def embed_document(self, text: str) -> list[float]:
+            if text == "alpha memory":
+                return [1.0] + [0.0] * 7
+            raise AssertionError(f"Unexpected document {text!r}")
+
+        def embed_queries(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_query(text) for text in texts]
+
+        def embed_query(self, text: str) -> list[float]:
+            if text == "alpha":
+                return [1.0] + [0.0] * 7
+            raise AssertionError(f"Unexpected query {text!r}")
+
+    result = reembed_project(tmp_path, embedder=ReembedEmbedder(), exact=True)
+
+    assert result.reembedded is True
+    assert seen["keep_model_names"] == ["snowflake/snowflake-arctic-embed-m"]
+    assert result.cache_prune is not None
+    assert result.cache_prune.kept_models == ["snowflake/snowflake-arctic-embed-m"]
+
+
 def test_consolidate_reports_duplicates_without_mutating_nodes(tmp_path: Path) -> None:
     memory = make_memory(tmp_path)
     try:
@@ -93,14 +332,41 @@ def test_consolidate_reports_duplicates_without_mutating_nodes(tmp_path: Path) -
         memory.close()
 
     assert before == 2
-    assert len(report.merged_groups) == 1
+    assert len(report.clusters) == 1
+    assert len(report.clusters[0].member_ids) == 2
     assert after == 2
+
+
+def test_consolidate_returns_overlapping_similarity_clusters(tmp_path: Path) -> None:
+    config = MemoryConfig(
+        embedding_backend="hash",
+    )
+    project = init_project(tmp_path, config=config)
+    memory = AgentMemory(project)
+    try:
+        def _pad(values: list[float]) -> list[float]:
+            return values + [0.0] * (config.embedding_dimensions - len(values))
+
+        memory.save("seed memory", embedding=_pad([1.0, 0.0]))
+        memory.save("left neighbor", embedding=_pad([0.97, 0.2431049]))
+        memory.save("right neighbor", embedding=_pad([0.97, -0.2431049]))
+        memory.save("far away", embedding=_pad([0.0, 1.0]))
+        report = memory.consolidate()
+    finally:
+        memory.close()
+
+    member_sets = {tuple(cluster.member_ids) for cluster in report.clusters}
+    assert len(report.clusters) == 3
+    assert report.candidate_pair_count == 2
+    assert report.clustered_memory_count == 3
+    assert any(len(cluster.member_ids) == 3 for cluster in report.clusters)
+    assert len(member_sets) == 3
 
 
 def test_save_rejects_overlong_memory(tmp_path: Path) -> None:
     memory = make_memory(tmp_path)
     try:
-        text = "word " * 1001
+        text = "word " * 251
         try:
             memory.save(text)
         except ValueError as exc:
@@ -133,7 +399,7 @@ def test_capture_turn_batches_raw_turn_and_distilled_memories(tmp_path: Path) ->
 def test_capture_turn_truncates_overlong_messages(tmp_path: Path) -> None:
     memory = make_memory(tmp_path)
     try:
-        overlong = "word " * 1105
+        overlong = "word " * 355
         result = memory.capture_turn(
             user_text=overlong,
             assistant_text=overlong,

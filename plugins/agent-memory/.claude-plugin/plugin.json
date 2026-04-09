@@ -1,0 +1,18 @@
+{
+  "name": "agent-memory",
+  "description": "Plugin-managed installation of agent-memory for Claude Code, plus setup and doctor skills for project memory.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Ben",
+    "email": "ben@equitydatascience.com"
+  },
+  "homepage": "https://github.com/ben1787/agent-memory",
+  "repository": "https://github.com/ben1787/agent-memory",
+  "license": "MIT",
+  "keywords": [
+    "agent-memory",
+    "memory",
+    "hooks",
+    "claude-code"
+  ]
+}

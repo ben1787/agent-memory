@@ -19,16 +19,60 @@ def _config_path(root: Path) -> Path:
     return root / APP_DIR_NAME / CONFIG_FILENAME
 
 
+CURRENT_CONFIG_VERSION = 6
+LEGACY_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+LEGACY_DEFAULT_DIMENSIONS = 384
+DEFAULT_MODEL = "snowflake/snowflake-arctic-embed-m"
+DEFAULT_DIMENSIONS = 768
+DEFAULT_MAX_MEMORY_WORDS = 250
+
+
 @dataclass(slots=True)
 class MemoryConfig:
-    version: int = 4
+    version: int = CURRENT_CONFIG_VERSION
     embedding_backend: str = "fastembed"
-    embedding_model: str = "BAAI/bge-small-en-v1.5"
-    embedding_dimensions: int = 384
-    max_memory_words: int = 1000
+    embedding_model: str = DEFAULT_MODEL
+    embedding_dimensions: int = DEFAULT_DIMENSIONS
+    stored_embedding_backend: str | None = None
+    stored_embedding_model: str | None = None
+    stored_embedding_dimensions: int | None = None
+    max_memory_words: int = DEFAULT_MAX_MEMORY_WORDS
     duplicate_threshold: float = 0.97
     overlap_threshold: float = 0.90
     lexical_duplicate_threshold: float = 0.95
+    consolidation_similarity_threshold: float = 0.92
+
+    def __post_init__(self) -> None:
+        if self.stored_embedding_backend is None:
+            self.stored_embedding_backend = self.embedding_backend
+        if self.stored_embedding_model is None:
+            self.stored_embedding_model = self.embedding_model
+        if self.stored_embedding_dimensions is None:
+            self.stored_embedding_dimensions = self.embedding_dimensions
+
+    def desired_embedding_signature(self) -> tuple[str, str, int]:
+        return (
+            self.embedding_backend,
+            self.embedding_model,
+            self.embedding_dimensions,
+        )
+
+    def stored_embedding_signature(self) -> tuple[str, str, int]:
+        return (
+            self.stored_embedding_backend or self.embedding_backend,
+            self.stored_embedding_model or self.embedding_model,
+            self.stored_embedding_dimensions or self.embedding_dimensions,
+        )
+
+    def needs_reembed(self) -> bool:
+        return self.stored_embedding_signature() != self.desired_embedding_signature()
+
+    def with_store_current(self) -> "MemoryConfig":
+        payload = self.to_dict()
+        payload["stored_embedding_backend"] = self.embedding_backend
+        payload["stored_embedding_model"] = self.embedding_model
+        payload["stored_embedding_dimensions"] = self.embedding_dimensions
+        return MemoryConfig.from_dict(payload)
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> "MemoryConfig":
@@ -43,6 +87,28 @@ class MemoryConfig:
         data.pop("max_neighbors", None)
         data.pop("max_frontier_nodes_per_hop", None)
         data.pop("max_hops", None)
+
+        version = int(data.get("version", 4))
+        original_backend = str(data.get("embedding_backend", "fastembed"))
+        original_model = str(data.get("embedding_model", LEGACY_DEFAULT_MODEL))
+        original_dimensions = int(data.get("embedding_dimensions", LEGACY_DEFAULT_DIMENSIONS))
+
+        data.setdefault("stored_embedding_backend", original_backend)
+        data.setdefault("stored_embedding_model", original_model)
+        data.setdefault("stored_embedding_dimensions", original_dimensions)
+
+        if version < CURRENT_CONFIG_VERSION:
+            if (
+                original_backend == "fastembed"
+                and original_model == LEGACY_DEFAULT_MODEL
+                and original_dimensions == LEGACY_DEFAULT_DIMENSIONS
+            ):
+                data["embedding_model"] = DEFAULT_MODEL
+                data["embedding_dimensions"] = DEFAULT_DIMENSIONS
+            max_words = int(data.get("max_memory_words", 1000))
+            if max_words in (1000, 200):
+                data["max_memory_words"] = DEFAULT_MAX_MEMORY_WORDS
+            data["version"] = CURRENT_CONFIG_VERSION
 
         return cls(**data)
 
@@ -68,7 +134,7 @@ This project uses Agent Memory for project-scoped long-term memory.
 Rules:
 - Treat this memory store as specific to the current project root.
 - If there is any ambiguity about which project root is active, ask the user instead of guessing.
-- Before substantive work, decide whether to call `recall_memories` with a concrete query tied to the current task.
+- If prior project knowledge might help and the answer is not already clear from the current context or code, consider calling `recall_memories` with a concrete query tied to the current task.
 - During work, decide whether there are 0-3 durable memories worth saving with `save_memory`.
 - If the MCP tools are unavailable in the current client, fall back to `agent-memory recall` and `agent-memory save` in the current project root.
 - Prefer stable facts, decisions, file locations, constraints, preferences, and discovered relationships.
@@ -76,7 +142,7 @@ Rules:
 - Save memories into this project store only; never write into some parent or sibling project by accident.
 
 Suggested workflow:
-1. Consider whether recalling stored memories would help with the current task.
+1. If prior project knowledge might help and the answer is not already obvious from the current context or code, consider recalling stored memories.
 2. If yes, call `agent-memory recall "<task-specific query>"`.
 3. Do the work.
 4. If the work produced durable project knowledge, save 0-3 concise memories with `agent-memory save`.
@@ -126,7 +192,11 @@ def load_project(start: Path | None = None, exact: bool = False) -> ProjectConte
     config_path = app_dir / CONFIG_FILENAME
     if not config_path.exists():
         raise ConfigError(f"Missing config file at {config_path}")
-    config = MemoryConfig.from_dict(json.loads(config_path.read_text(encoding='utf-8')))
+    raw_config = json.loads(config_path.read_text(encoding='utf-8'))
+    config = MemoryConfig.from_dict(raw_config)
+    normalized = config.to_dict()
+    if normalized != raw_config:
+        config_path.write_text(json.dumps(normalized, indent=2) + "\n", encoding='utf-8')
     return ProjectContext(
         root=root,
         app_dir=app_dir,

@@ -215,7 +215,7 @@ def test_save_command_persists_memory(tmp_path: Path) -> None:
         recall = memory.recall("CLI save works", limit=5).to_dict()
     finally:
         memory.close()
-    assert recall["hits"][0]["text"] == "CLI save works"
+    assert recall["nodes"][0]["text"] == "CLI save works"
 
 
 def test_save_command_reads_stdin(tmp_path: Path) -> None:
@@ -237,7 +237,7 @@ def test_save_command_reads_stdin(tmp_path: Path) -> None:
         recall = memory.recall("multi-line memory quotes backticks", limit=5).to_dict()
     finally:
         memory.close()
-    assert any(body == h["text"] for h in recall["hits"])
+    assert any(body == node["text"] for node in recall["nodes"])
 
 
 def test_save_command_stdin_rejects_combined_args(tmp_path: Path) -> None:
@@ -261,6 +261,47 @@ def test_save_command_requires_text_or_stdin(tmp_path: Path) -> None:
     result = runner.invoke(app, ["save", "--cwd", str(tmp_path)])
 
     assert result.exit_code != 0
+
+
+def test_import_repo_command_bootstraps_project_corpus(tmp_path: Path) -> None:
+    init_project(
+        tmp_path,
+        config=MemoryConfig(
+            embedding_backend="hash",
+            embedding_dimensions=64,
+            max_memory_words=80,
+        ),
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text(
+        "# Guide\n\nThis importer creates memories from repo files.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text(
+        "def main():\n    return 'ok'\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "import-repo",
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "--max-memories",
+            "5",
+            "--max-file-kb",
+            "64",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["imported_memories"] >= 2
+    assert payload["total_memories"] == payload["imported_memories"]
 
 
 def test_list_command_returns_recent_memories_newest_first(tmp_path: Path) -> None:
@@ -416,6 +457,40 @@ def test_delete_command_requires_yes_for_nonzero_confirmation(tmp_path: Path) ->
         memory.close()
 
 
+def test_consolidation_status_start_and_complete_commands(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+
+    initial = runner.invoke(app, ["consolidation-status", "--cwd", str(tmp_path), "--json"])
+    assert initial.exit_code == 0, initial.stdout
+    initial_payload = json.loads(initial.stdout)
+    assert initial_payload["is_pending_today"] is False
+    assert initial_payload["execution_mode"] == "dry_run"
+    assert initial_payload["requires_approval"] is False
+
+    started = runner.invoke(app, ["consolidation-start", "--cwd", str(tmp_path), "--json"])
+    assert started.exit_code == 0, started.stdout
+    started_payload = json.loads(started.stdout)
+    assert started_payload["status"] == "started"
+    assert started_payload["is_in_progress_today"] is True
+    assert started_payload["execution_mode"] == "dry_run"
+
+    approved = runner.invoke(app, ["consolidation-approve", "--cwd", str(tmp_path), "--json"])
+    assert approved.exit_code == 0, approved.stdout
+    approved_payload = json.loads(approved.stdout)
+    assert approved_payload["status"] == "approved"
+    assert approved_payload["execution_mode"] == "apply"
+    assert approved_payload["is_approved_today"] is True
+    assert approved_payload["requires_approval"] is False
+
+    completed = runner.invoke(app, ["consolidation-complete", "--cwd", str(tmp_path), "--json"])
+    assert completed.exit_code == 0, completed.stdout
+    completed_payload = json.loads(completed.stdout)
+    assert completed_payload["status"] == "completed"
+    assert completed_payload["is_completed_today"] is True
+    assert completed_payload["is_pending_today"] is False
+
+
 def test_undo_command_reverts_save(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     memory = open_memory_with_retry(tmp_path, exact=True)
@@ -470,6 +545,99 @@ def test_undo_command_with_empty_log_exits_nonzero(tmp_path: Path) -> None:
     assert undo.exit_code != 0
 
 
+def test_reembed_command_rebuilds_store_with_current_config(tmp_path: Path) -> None:
+    init_project(
+        tmp_path,
+        config=MemoryConfig(
+            version=4,
+            embedding_backend="hash",
+            embedding_model="hash-legacy",
+            embedding_dimensions=2,
+            max_memory_words=1000,
+            stored_embedding_backend="hash",
+            stored_embedding_model="hash-legacy",
+            stored_embedding_dimensions=2,
+        ),
+    )
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        memory.save("alpha memory")
+    finally:
+        memory.close()
+
+    updated_config = MemoryConfig(
+        embedding_backend="hash",
+        embedding_model="hash-v2",
+        embedding_dimensions=8,
+        stored_embedding_backend="hash",
+        stored_embedding_model="hash-legacy",
+        stored_embedding_dimensions=2,
+        max_memory_words=250,
+    )
+    (tmp_path / ".agent-memory" / "config.json").write_text(
+        json.dumps(updated_config.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["reembed", "--cwd", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["reembedded"] is True
+    assert payload["memory_count"] == 1
+    assert payload["current_store"]["embedding_dimensions"] == 8
+
+    reopened = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        records = reopened.list_all()
+        assert len(records) == 1
+        assert len(records[0].embedding) == 8
+        assert reopened.project.config.stored_embedding_dimensions == 8
+    finally:
+        reopened.close()
+
+
+def test_prune_model_cache_command_removes_stale_fastembed_models(monkeypatch, tmp_path: Path) -> None:
+    init_project(
+        tmp_path,
+        config=MemoryConfig(
+            embedding_backend="fastembed",
+            embedding_model="snowflake/snowflake-arctic-embed-m",
+            embedding_dimensions=768,
+            stored_embedding_backend="fastembed",
+            stored_embedding_model="snowflake/snowflake-arctic-embed-m",
+            stored_embedding_dimensions=768,
+            max_memory_words=250,
+        ),
+    )
+
+    cache_root = tmp_path / "fastembed-cache"
+    keep_dir = cache_root / "models--Snowflake--snowflake-arctic-embed-m"
+    stale_dir = cache_root / "models--qdrant--bge-small-en-v1.5-onnx-q"
+    keep_dir.mkdir(parents=True)
+    stale_dir.mkdir(parents=True)
+    (keep_dir / "weights.bin").write_bytes(b"keep")
+    (stale_dir / "weights.bin").write_bytes(b"stale-cache")
+    stale_lock = cache_root / ".locks" / stale_dir.name
+    stale_lock.mkdir(parents=True)
+
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache_root))
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["prune-model-cache", "--cwd", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["kept_models"] == ["snowflake/snowflake-arctic-embed-m"]
+    assert len(payload["pruned"]) == 1
+    assert payload["pruned"][0]["model_name"] == "BAAI/bge-small-en-v1.5"
+    assert payload["freed_bytes"] > 0
+    assert keep_dir.exists()
+    assert not stale_dir.exists()
+    assert not stale_lock.exists()
+
+
 def test_recall_command_accepts_unquoted_multi_word_query(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     memory = open_memory_with_retry(tmp_path, exact=True)
@@ -486,4 +654,6 @@ def test_recall_command_accepts_unquoted_multi_word_query(tmp_path: Path) -> Non
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
-    assert payload["hits"][0]["text"] == "The billing webhook handler lives in services/billing/webhooks.py."
+    assert payload["query"] == "billing webhook handler"
+    assert payload["nodes"][0]["source"] == "QUERY"
+    assert payload["nodes"][0]["text"] == "The billing webhook handler lives in services/billing/webhooks.py."

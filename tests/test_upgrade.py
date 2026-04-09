@@ -9,12 +9,16 @@ from agent_memory import upgrade
 
 
 def test_parse_version_handles_v_prefix_and_prerelease() -> None:
-    assert upgrade._parse_version("v1.2.3") == (1, 2, 3)
-    assert upgrade._parse_version("1.2.3") == (1, 2, 3)
-    # Prerelease suffix is stripped for comparison purposes.
-    assert upgrade._parse_version("v1.2.3-rc.1") == (1, 2, 3)
+    assert upgrade._parse_version("v1.2.3") == (1, 2, 3, 3, 0)
+    assert upgrade._parse_version("1.2.3") == (1, 2, 3, 3, 0)
+    assert upgrade._parse_version("v1.2.3-rc.1") == (1, 2, 3, 2, 1)
+    assert upgrade._parse_version("1.2.3rc1") == (1, 2, 3, 2, 1)
     # Non-numeric chunks become 0 rather than raising.
-    assert upgrade._parse_version("v1.2.foo") == (1, 2, 0)
+    assert upgrade._parse_version("v1.2.foo") == (1, 2, 0, 3, 0)
+
+
+def test_parse_version_orders_stable_after_prerelease() -> None:
+    assert upgrade._parse_version("v1.2.3") > upgrade._parse_version("v1.2.3-rc.1")
 
 
 def test_detect_asset_name_returns_none_on_unsupported_platform(monkeypatch) -> None:
@@ -63,7 +67,7 @@ def test_check_for_upgrade_returns_none_when_already_latest(tmp_path, monkeypatc
     cache_file.write_text(json.dumps({"checked_at": 0, "latest_tag": "v0.0.1"}), encoding='utf-8')
 
     fake_latest = upgrade.LatestRelease(
-        tag=f"v{upgrade.__version__}",
+        tag="v0.1.0-rc.2",
         version_tuple=upgrade._parse_version(upgrade.__version__),
         asset_url="",
         asset_sha_url="",
@@ -91,7 +95,7 @@ def test_check_for_upgrade_handles_network_failure_silently(tmp_path, monkeypatc
 
 def test_perform_upgrade_reports_up_to_date(monkeypatch) -> None:
     fake_latest = upgrade.LatestRelease(
-        tag=f"v{upgrade.__version__}",
+        tag="v0.1.0-rc.2",
         version_tuple=upgrade._parse_version(upgrade.__version__),
         asset_url="",
         asset_sha_url="",
@@ -102,7 +106,7 @@ def test_perform_upgrade_reports_up_to_date(monkeypatch) -> None:
     result = upgrade.perform_upgrade()
 
     assert result["status"] == "up-to-date"
-    assert result["current_version"] == upgrade.__version__
+    assert result["current_version"] == upgrade.__display_version__
 
 
 def test_perform_upgrade_reports_unsupported_platform(monkeypatch) -> None:

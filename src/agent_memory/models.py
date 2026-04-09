@@ -90,13 +90,73 @@ class SaveManyResult:
 
 
 @dataclass(slots=True)
-class ConsolidationReport:
-    merged_groups: list[list[str]]
-    overlap_candidates: list[dict[str, object]]
-    remaining_memories: int
+class ConsolidationClusterMember:
+    memory_id: str
+    text: str
+    created_at: str
+
+    def preview(self, limit: int = 140) -> str:
+        text = " ".join(self.text.split())
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 1].rstrip()}…"
+
+    def to_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        payload["preview"] = self.preview()
+        return payload
+
+
+@dataclass(slots=True)
+class ConsolidationClusterEdge:
+    source_id: str
+    target_id: str
+    similarity: float
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(slots=True)
+class ConsolidationCluster:
+    cluster_id: str
+    seed_memory_ids: list[str]
+    member_ids: list[str]
+    members: list[ConsolidationClusterMember]
+    pair_edges: list[ConsolidationClusterEdge]
+    average_similarity: float
+    max_similarity: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cluster_id": self.cluster_id,
+            "seed_memory_ids": self.seed_memory_ids,
+            "member_ids": self.member_ids,
+            "members": [member.to_dict() for member in self.members],
+            "pair_edges": [edge.to_dict() for edge in self.pair_edges],
+            "average_similarity": self.average_similarity,
+            "max_similarity": self.max_similarity,
+        }
+
+
+@dataclass(slots=True)
+class ConsolidationReport:
+    threshold: float
+    clusters: list[ConsolidationCluster]
+    total_memories: int
+    clustered_memory_count: int
+    candidate_pair_count: int
+    generated_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "threshold": self.threshold,
+            "clusters": [cluster.to_dict() for cluster in self.clusters],
+            "total_memories": self.total_memories,
+            "clustered_memory_count": self.clustered_memory_count,
+            "candidate_pair_count": self.candidate_pair_count,
+            "generated_at": self.generated_at,
+        }
 
 
 @dataclass(slots=True)

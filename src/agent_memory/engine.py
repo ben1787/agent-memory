@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import heapq
+import json
 from pathlib import Path
 import re
 import time
@@ -19,8 +19,19 @@ from agent_memory.config import (
     init_project,
     load_project,
 )
-from agent_memory.embeddings import Embedder, build_embedder, cosine_similarity
+from agent_memory.embeddings import (
+    Embedder,
+    FastembedCachePruneResult,
+    build_embedder,
+    cosine_similarity,
+    embed_document,
+    embed_query,
+    prune_fastembed_model_cache,
+)
 from agent_memory.models import (
+    ConsolidationCluster,
+    ConsolidationClusterEdge,
+    ConsolidationClusterMember,
     ConsolidationReport,
     MemoryCluster,
     MemoryHit,
@@ -104,9 +115,22 @@ class UnionFind:
 
 @dataclass(slots=True)
 class RecallResult:
+    query: str
     seed_ids: list[str]
     hits: list[MemoryHit]
+    sources: list[tuple[str, str | None, float]]
     seed_score: float = 0.0
+
+    @staticmethod
+    def _alias_for_index(index: int) -> str:
+        label = ""
+        value = index
+        while True:
+            value, remainder = divmod(value, 26)
+            label = chr(ord("A") + remainder) + label
+            if value == 0:
+                return label
+            value -= 1
 
     @property
     def clusters(self) -> list[MemoryCluster]:
@@ -123,13 +147,68 @@ class RecallResult:
         ]
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "root": "query",
-            "seed_ids": self.seed_ids,
-            "seed_score": round(self.seed_score, 4),
-            "hits": [hit.to_dict() for hit in self.hits],
-            "clusters": [cluster.to_dict() for cluster in self.clusters],
+        alias_by_memory_id = {
+            hit.memory_id: self._alias_for_index(index)
+            for index, hit in enumerate(self.hits)
         }
+        source_by_memory_id = {
+            memory_id: (source_id, source_similarity)
+            for memory_id, source_id, source_similarity in self.sources
+        }
+        nodes: list[dict[str, object]] = []
+        for index, hit in enumerate(self.hits):
+            alias = alias_by_memory_id[hit.memory_id]
+            source_id, source_similarity = source_by_memory_id.get(hit.memory_id, (None, 0.0))
+            nodes.append(
+                {
+                    "alias": alias,
+                    "source": "QUERY" if source_id is None else alias_by_memory_id.get(source_id, source_id),
+                    "source_similarity": round(source_similarity, 4),
+                    "created_at": hit.created_at,
+                    "memory_id": hit.memory_id,
+                    "text": hit.text,
+                }
+            )
+        return {
+            "query": self.query,
+            "nodes": nodes,
+        }
+
+
+@dataclass(slots=True)
+class ReembedResult:
+    project_root: Path
+    db_path: Path
+    reembedded: bool
+    memory_count: int
+    previous_store_backend: str
+    previous_store_model: str
+    previous_store_dimensions: int
+    current_store_backend: str
+    current_store_model: str
+    current_store_dimensions: int
+    cache_prune: FastembedCachePruneResult | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        payload = {
+            "project_root": str(self.project_root),
+            "db_path": str(self.db_path),
+            "reembedded": self.reembedded,
+            "memory_count": self.memory_count,
+            "previous_store": {
+                "embedding_backend": self.previous_store_backend,
+                "embedding_model": self.previous_store_model,
+                "embedding_dimensions": self.previous_store_dimensions,
+            },
+            "current_store": {
+                "embedding_backend": self.current_store_backend,
+                "embedding_model": self.current_store_model,
+                "embedding_dimensions": self.current_store_dimensions,
+            },
+        }
+        if self.cache_prune is not None:
+            payload["cache_prune"] = self.cache_prune.to_dict()
+        return payload
 
 
 class AgentMemory:
@@ -167,11 +246,11 @@ class AgentMemory:
         exact: bool = False,
         read_only: bool = False,
     ) -> "AgentMemory":
-        return cls(
-            load_project(start, exact=exact),
-            embedder=embedder,
-            read_only=read_only,
-        )
+        project = load_project(start, exact=exact)
+        if project.config.needs_reembed():
+            reembed_project(project.root, embedder=embedder, exact=True)
+            project = load_project(project.root, exact=True)
+        return cls(project, embedder=embedder, read_only=read_only)
 
     @classmethod
     def initialize(
@@ -212,7 +291,7 @@ class AgentMemory:
             )
 
         existing = list(self._memories)
-        resolved_embedding = embedding or self.embedder.embed_text(cleaned)
+        resolved_embedding = embedding or embed_document(self.embedder, cleaned)
         timestamp = utc_now()
         memory = MemoryRecord(
             id=f"mem_{uuid.uuid4().hex[:12]}",
@@ -300,7 +379,7 @@ class AgentMemory:
             )
 
         before_payload = _record_to_payload(existing)
-        new_embedding = self.embedder.embed_text(cleaned)
+        new_embedding = embed_document(self.embedder, cleaned)
         timestamp = utc_now()
         updated = MemoryRecord(
             id=existing.id,
@@ -494,7 +573,7 @@ class AgentMemory:
                 continue
             resolved_embedding = record.get("embedding")
             if not isinstance(resolved_embedding, list):
-                resolved_embedding = self.embedder.embed_text(cleaned)
+                resolved_embedding = embed_document(self.embedder, cleaned)
             memory = MemoryRecord(
                 id=f"mem_{uuid.uuid4().hex[:12]}",
                 text=cleaned,
@@ -524,7 +603,7 @@ class AgentMemory:
 
         memories = self._memories
         if not memories:
-            return RecallResult(seed_ids=[], hits=[], seed_score=0.0)
+            return RecallResult(query=cleaned_query, seed_ids=[], hits=[], sources=[], seed_score=0.0)
 
         query_scores = self._query_similarities(cleaned_query)
         top_query_similarity = max(
@@ -535,16 +614,19 @@ class AgentMemory:
             query_scores=query_scores,
             limit=limit,
         )
-        ordered_hits = [
-            MemoryHit(
-                memory_id=memory_id,
-                text=self._memory_by_id[memory_id].text,
-                score=round(score, 4),
-                query_similarity=round(query_scores.get(memory_id, 0.0), 4),
-                created_at=self._memory_by_id[memory_id].created_at,
+        ordered_hits = []
+        sources: list[tuple[str, str | None, float]] = []
+        for memory_id, score, source_id, source_similarity in ranked_scores[:limit]:
+            ordered_hits.append(
+                MemoryHit(
+                    memory_id=memory_id,
+                    text=self._memory_by_id[memory_id].text,
+                    score=round(score, 4),
+                    query_similarity=round(query_scores.get(memory_id, 0.0), 4),
+                    created_at=self._memory_by_id[memory_id].created_at,
+                )
             )
-            for memory_id, score in ranked_scores[:limit]
-        ]
+            sources.append((memory_id, source_id, source_similarity))
         touched = [hit.memory_id for hit in ordered_hits]
         if touched and not self.read_only:
             timestamp = utc_now()
@@ -556,8 +638,10 @@ class AgentMemory:
                 cached.access_count += 1
                 cached.last_accessed = timestamp
         return RecallResult(
+            query=cleaned_query,
             seed_ids=[],
             hits=ordered_hits,
+            sources=sources,
             seed_score=top_query_similarity,
         )
 
@@ -585,7 +669,7 @@ class AgentMemory:
 
         memories = self._memories
         if not memories:
-            return RecallResult(seed_ids=[], hits=[], seed_score=0.0)
+            return RecallResult(query=cleaned_query, seed_ids=[], hits=[], sources=[], seed_score=0.0)
 
         query_scores = self._query_similarities(cleaned_query)
         ranked_memories = sorted(
@@ -607,6 +691,14 @@ class AgentMemory:
             )
             for memory in ranked_memories
         ]
+        sources = [
+            (
+                memory.memory_id,
+                None,
+                self._path_weight(query_scores.get(memory.memory_id, 0.0)),
+            )
+            for memory in ordered_hits
+        ]
         top_query_similarity = ordered_hits[0].score if ordered_hits else 0.0
 
         # Reason: mirror the touch-on-read behavior of `recall()` so that
@@ -624,52 +716,116 @@ class AgentMemory:
                 cached.last_accessed = timestamp
 
         return RecallResult(
+            query=cleaned_query,
             seed_ids=[],
             hits=ordered_hits,
+            sources=sources,
             seed_score=top_query_similarity,
         )
 
     def consolidate(self) -> ConsolidationReport:
-        memories = self.store.list_memories()
-        if len(memories) < 2:
+        threshold = self.config.consolidation_similarity_threshold
+        if len(self._memories) < 2:
             return ConsolidationReport(
-                merged_groups=[],
-                overlap_candidates=[],
-                remaining_memories=len(memories),
+                threshold=threshold,
+                clusters=[],
+                total_memories=len(self._memories),
+                clustered_memory_count=0,
+                candidate_pair_count=0,
+                generated_at=utc_now(),
             )
 
-        union_find = UnionFind([memory.id for memory in memories])
-        overlap_candidates: list[dict[str, object]] = []
+        def member_sort_key(memory_id: str) -> tuple[str, str]:
+            memory = self._memory_by_id[memory_id]
+            return (memory.created_at, memory.id)
 
-        for index, left in enumerate(memories):
-            for right in memories[index + 1 :]:
-                similarity = cosine_similarity(left.embedding, right.embedding)
-                lexical = lexical_similarity(left.text, right.text)
-                if self._should_merge(left, right, similarity, lexical):
-                    union_find.union(left.id, right.id)
-                elif similarity >= self.config.overlap_threshold:
-                    overlap_candidates.append(
-                        {
-                            "left_id": left.id,
-                            "right_id": right.id,
-                            "semantic_similarity": round(similarity, 4),
-                            "lexical_similarity": round(lexical, 4),
-                        }
+        clusters_by_key: dict[tuple[str, ...], ConsolidationCluster] = {}
+        unique_pairs: set[tuple[str, str]] = set()
+
+        for memory in self._memories:
+            neighbors = [
+                neighbor_id
+                for neighbor_id, score in self._strong_adjacency.get(memory.id, {}).items()
+                if score >= threshold
+            ]
+            if not neighbors:
+                continue
+
+            member_ids = sorted({memory.id, *neighbors}, key=member_sort_key)
+            key = tuple(member_ids)
+            if key in clusters_by_key:
+                seed_ids = clusters_by_key[key].seed_memory_ids
+                if memory.id not in seed_ids:
+                    seed_ids.append(memory.id)
+                    seed_ids.sort(key=member_sort_key)
+                continue
+
+            pair_edges: list[ConsolidationClusterEdge] = []
+            similarities: list[float] = []
+            for left_index, left_id in enumerate(member_ids):
+                for right_id in member_ids[left_index + 1 :]:
+                    similarity = self._strong_adjacency.get(left_id, {}).get(right_id, 0.0)
+                    if similarity < threshold:
+                        continue
+                    rounded_similarity = round(similarity, 4)
+                    pair_edges.append(
+                        ConsolidationClusterEdge(
+                            source_id=left_id,
+                            target_id=right_id,
+                            similarity=rounded_similarity,
+                        )
                     )
+                    similarities.append(rounded_similarity)
+                    unique_pairs.add(tuple(sorted((left_id, right_id))))
 
-        groups: dict[str, list[MemoryRecord]] = defaultdict(list)
-        for memory in memories:
-            groups[union_find.find(memory.id)].append(memory)
+            if not pair_edges:
+                continue
 
-        merged_groups = [group for group in groups.values() if len(group) > 1]
-        merged_ids = [
-            [memory.id for memory in sorted(group, key=lambda item: item.created_at)]
-            for group in merged_groups
-        ]
+            clusters_by_key[key] = ConsolidationCluster(
+                cluster_id="",
+                seed_memory_ids=[memory.id],
+                member_ids=member_ids,
+                members=[
+                    ConsolidationClusterMember(
+                        memory_id=member_id,
+                        text=self._memory_by_id[member_id].text,
+                        created_at=self._memory_by_id[member_id].created_at,
+                    )
+                    for member_id in member_ids
+                ],
+                pair_edges=pair_edges,
+                average_similarity=round(sum(similarities) / len(similarities), 4),
+                max_similarity=max(similarities),
+            )
+
+        clusters = sorted(
+            clusters_by_key.values(),
+            key=lambda cluster: (
+                -len(cluster.member_ids),
+                -cluster.max_similarity,
+                -cluster.average_similarity,
+                cluster.member_ids,
+            ),
+        )
+        for index, cluster in enumerate(clusters, start=1):
+            cluster.cluster_id = f"cluster_{index}"
+            cluster.seed_memory_ids.sort(key=member_sort_key)
+            cluster.pair_edges.sort(
+                key=lambda edge: (edge.source_id, edge.target_id),
+            )
+
+        clustered_memory_ids = {
+            member_id
+            for cluster in clusters
+            for member_id in cluster.member_ids
+        }
         return ConsolidationReport(
-            merged_groups=merged_ids,
-            overlap_candidates=overlap_candidates,
-            remaining_memories=len(memories),
+            threshold=threshold,
+            clusters=clusters,
+            total_memories=len(self._memories),
+            clustered_memory_count=len(clustered_memory_ids),
+            candidate_pair_count=len(unique_pairs),
+            generated_at=utc_now(),
         )
 
     def stats(self) -> MemoryStats:
@@ -729,7 +885,7 @@ class AgentMemory:
     def _query_similarities(self, query: str) -> dict[str, float]:
         if self._embedding_matrix is None:
             return {}
-        query_embedding = self._normalize_embedding(self.embedder.embed_text(query))
+        query_embedding = self._normalize_embedding(embed_query(self.embedder, query))
         scores = self._embedding_matrix @ query_embedding
         return {
             memory_id: float(score)
@@ -812,7 +968,7 @@ class AgentMemory:
         self,
         query_scores: dict[str, float],
         limit: int,
-    ) -> list[tuple[str, float]]:
+    ) -> list[tuple[str, float, str | None, float]]:
         initial_scores = {
             memory_id: self._path_weight(score)
             for memory_id, score in query_scores.items()
@@ -827,21 +983,27 @@ class AgentMemory:
                 reverse=True,
             )
             return [
-                (memory.id, self._path_weight(query_scores.get(memory.id, 0.0)))
+                (
+                    memory.id,
+                    self._path_weight(query_scores.get(memory.id, 0.0)),
+                    None,
+                    self._path_weight(query_scores.get(memory.id, 0.0)),
+                )
                 for memory in ranked[:limit]
             ]
 
         sorted_neighbors = self._ensure_sorted_neighbors()
         settled_scores: dict[str, float] = {}
-        results: list[tuple[str, float]] = []
+        results: list[tuple[str, float, str | None, float]] = []
         serial = 0
-        heap: list[tuple[float, float, int, str, str, int]] = []
+        heap: list[tuple[float, float, int, str, str, int, float]] = []
 
         def push_candidate(
             score: float,
             node_id: str,
             parent_id: str | None,
             neighbor_index: int,
+            source_similarity: float,
         ) -> int:
             nonlocal serial
             if score <= 0.0:
@@ -855,6 +1017,7 @@ class AgentMemory:
                     node_id,
                     parent_id or "",
                     neighbor_index,
+                    source_similarity,
                 ),
             )
             serial += 1
@@ -862,33 +1025,34 @@ class AgentMemory:
 
         def push_next_neighbor(parent_id: str, start_index: int) -> None:
             neighbors = sorted_neighbors.get(parent_id, [])
-            parent_score = settled_scores.get(parent_id, 0.0)
             index = start_index
             while index < len(neighbors):
                 neighbor_id, edge_weight = neighbors[index]
                 if neighbor_id not in settled_scores:
+                    edge_similarity = self._path_weight(edge_weight)
                     push_candidate(
-                        parent_score * self._path_weight(edge_weight),
+                        edge_similarity,
                         neighbor_id,
                         parent_id,
                         index,
+                        edge_similarity,
                     )
                     return
                 index += 1
 
         for memory_id, score in initial_scores.items():
-            push_candidate(score, memory_id, None, -1)
+            push_candidate(score, memory_id, None, -1, score)
         heapq.heapify(heap)
 
         while heap and len(results) < limit:
-            negative_score, _, _, node_id, parent_id, neighbor_index = heapq.heappop(heap)
+            negative_score, _, _, node_id, parent_id, neighbor_index, source_similarity = heapq.heappop(heap)
             score = -negative_score
             if parent_id:
                 push_next_neighbor(parent_id, neighbor_index + 1)
             if node_id in settled_scores:
                 continue
             settled_scores[node_id] = score
-            results.append((node_id, score))
+            results.append((node_id, score, parent_id or None, source_similarity))
             push_next_neighbor(node_id, 0)
 
         if len(results) < limit:
@@ -903,7 +1067,8 @@ class AgentMemory:
             for memory in fallback:
                 if memory.id in settled_scores:
                     continue
-                results.append((memory.id, self._path_weight(query_scores.get(memory.id, 0.0))))
+                similarity = self._path_weight(query_scores.get(memory.id, 0.0))
+                results.append((memory.id, similarity, None, similarity))
                 if len(results) >= limit:
                     break
 
@@ -963,6 +1128,137 @@ class AgentMemory:
 def is_lock_conflict(error: Exception) -> bool:
     message = str(error)
     return "Could not set lock on file" in message
+
+
+def _write_project_config(project: ProjectContext, config: MemoryConfig) -> None:
+    project.config_path.write_text(json.dumps(config.to_dict(), indent=2) + "\n", encoding="utf-8")
+
+
+def reembed_project(
+    start: Path | None = None,
+    *,
+    embedder: Embedder | None = None,
+    exact: bool = False,
+    force: bool = False,
+) -> ReembedResult:
+    project = load_project(start, exact=exact)
+    config = project.config
+    previous_backend, previous_model, previous_dimensions = config.stored_embedding_signature()
+    current_backend, current_model, current_dimensions = config.desired_embedding_signature()
+
+    if not force and not config.needs_reembed():
+        memory_count = 0
+        if project.db_path.exists():
+            store = GraphStore(project.db_path, previous_dimensions, read_only=True)
+            try:
+                memory_count = store.count_memories()
+            finally:
+                store.close()
+        return ReembedResult(
+            project_root=project.root,
+            db_path=project.db_path,
+            reembedded=False,
+            memory_count=memory_count,
+            previous_store_backend=previous_backend,
+            previous_store_model=previous_model,
+            previous_store_dimensions=previous_dimensions,
+            current_store_backend=current_backend,
+            current_store_model=current_model,
+            current_store_dimensions=current_dimensions,
+        )
+
+    if embedder is None:
+        embedder = build_embedder(config)
+
+    memories: list[MemoryRecord] = []
+    next_edges = []
+    if project.db_path.exists():
+        source_store = GraphStore(
+            project.db_path,
+            previous_dimensions,
+            read_only=True,
+        )
+        try:
+            memories = source_store.list_memories()
+            next_edges = source_store.list_next_edges()
+        finally:
+            source_store.close()
+
+    temp_db_path = project.db_path.with_name(
+        f"{project.db_path.name}.reembed-{uuid.uuid4().hex}.tmp"
+    )
+    temp_store = GraphStore(temp_db_path, current_dimensions)
+    try:
+        for memory in memories:
+            temp_store.add_memory(
+                MemoryRecord(
+                    id=memory.id,
+                    text=memory.text,
+                    created_at=memory.created_at,
+                    embedding=embed_document(embedder, memory.text),
+                    importance=memory.importance,
+                    access_count=memory.access_count,
+                    last_accessed=memory.last_accessed,
+                )
+            )
+        timestamp = utc_now()
+        if next_edges:
+            seen_edges: set[tuple[str, str]] = set()
+            for edge in next_edges:
+                key = (edge.source_id, edge.target_id)
+                if key in seen_edges:
+                    continue
+                seen_edges.add(key)
+                temp_store.create_next_edge(edge.source_id, edge.target_id, edge.weight, timestamp)
+        else:
+            for previous, current in zip(memories, memories[1:]):
+                temp_store.create_next_edge(previous.id, current.id, 1.0, timestamp)
+    finally:
+        temp_store.close()
+
+    backup_path = project.db_path.with_name(
+        f"{project.db_path.name}.backup-{uuid.uuid4().hex}"
+    )
+    replaced_existing = False
+    try:
+        if project.db_path.exists():
+            project.db_path.replace(backup_path)
+            replaced_existing = True
+        temp_db_path.replace(project.db_path)
+    except Exception:
+        if temp_db_path.exists():
+            temp_db_path.unlink()
+        if replaced_existing and backup_path.exists():
+            backup_path.replace(project.db_path)
+        raise
+    else:
+        if backup_path.exists():
+            backup_path.unlink()
+
+    updated_config = config.with_store_current()
+    _write_project_config(project, updated_config)
+    cache_prune: FastembedCachePruneResult | None = None
+    if current_backend == "fastembed":
+        try:
+            cache_prune = prune_fastembed_model_cache([current_model])
+        except Exception:
+            # The store rewrite already succeeded. Cache pruning is best-effort
+            # cleanup and should not fail the migration path after the DB has
+            # been safely swapped.
+            cache_prune = None
+    return ReembedResult(
+        project_root=project.root,
+        db_path=project.db_path,
+        reembedded=True,
+        memory_count=len(memories),
+        previous_store_backend=previous_backend,
+        previous_store_model=previous_model,
+        previous_store_dimensions=previous_dimensions,
+        current_store_backend=current_backend,
+        current_store_model=current_model,
+        current_store_dimensions=current_dimensions,
+        cache_prune=cache_prune,
+    )
 
 
 def open_memory_with_retry(

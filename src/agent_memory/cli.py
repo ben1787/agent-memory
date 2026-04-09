@@ -23,7 +23,8 @@ if sys.platform.startswith("win"):
             pass
 
 from agent_memory.config import ConfigError, MemoryConfig, init_project, is_project_root, load_project
-from agent_memory.engine import AgentMemory, open_memory_with_retry
+from agent_memory.embeddings import prune_fastembed_model_cache
+from agent_memory.engine import AgentMemory, open_memory_with_retry, reembed_project
 from agent_memory.integration import (
     codex_project_trust_state,
     ensure_local_git_excludes,
@@ -45,19 +46,26 @@ from agent_memory.integration import (
     uninstall_memory_instructions,
 )
 from agent_memory.mcp_server import serve
+from agent_memory.repo_ingest import import_repo_corpus
 # smoke_test is POSIX-only (uses pty/fcntl/termios). Import lazily from inside
 # the command so `agent-memory --help` and every other command still work on
 # Windows, where the module cannot be imported at all.
 from agent_memory.store import GraphStore
-from agent_memory.hooks.common import hook_log_entries
+from agent_memory.hooks.common import (
+    approve_consolidation_apply,
+    consolidation_status,
+    hook_log_entries,
+    mark_consolidation_completed,
+    mark_consolidation_started,
+)
 
 
-from agent_memory import __version__
+from agent_memory import __display_version__, __version__
 
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"agent-memory {__version__}")
+        typer.echo(f"agent-memory {__display_version__}")
         raise typer.Exit()
 
 
@@ -107,7 +115,7 @@ app.add_typer(
     hook_app,
     name="_hook",
     hidden=True,
-    help="Internal: hook handlers invoked by Codex/Claude prompt-submit hooks.",
+    help="Internal: hook handlers invoked by Codex/Claude local hooks.",
 )
 
 
@@ -133,12 +141,45 @@ def _hook_codex_user_prompt_submit() -> None:
     _main()
 
 
+@hook_app.command(
+    name="claude-stop-capture",
+    help="Internal hook handler for Claude Code's Stop event.",
+    hidden=True,
+)
+def _hook_claude_stop_capture() -> None:
+    from agent_memory.hooks.claude_stop_capture import main as _main
+
+    _main()
+
+
+@hook_app.command(
+    name="codex-stop-capture",
+    help="Internal hook handler for Codex's Stop event.",
+    hidden=True,
+)
+def _hook_codex_stop_capture() -> None:
+    from agent_memory.hooks.codex_stop_capture import main as _main
+
+    _main()
+
+
 def _emit(payload: dict[str, object], as_json: bool) -> None:
     if as_json:
         typer.echo(json.dumps(payload, indent=2))
         return
     for key, value in payload.items():
         typer.echo(f"{key}: {value}")
+
+
+def _format_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{value} B"
 
 
 def _open_memory(cwd: Path, *, read_only: bool = False) -> AgentMemory:
@@ -180,6 +221,24 @@ def _resolve_project_path(path: Path | None) -> Path:
         return load_project(candidate).root
     except ConfigError:
         return suggest_project_root(candidate)
+
+
+def _default_smoke_reinstall_from(cwd: Path | None = None) -> Path | None:
+    candidate = (cwd or Path.cwd()).resolve()
+    pyproject_path = candidate / "pyproject.toml"
+    cli_path = candidate / "src" / "agent_memory" / "cli.py"
+    if not pyproject_path.exists() or not cli_path.exists():
+        return None
+    try:
+        payload = tomllib.loads(pyproject_path.read_text(encoding='utf-8'))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    project = payload.get("project")
+    if not isinstance(project, dict):
+        return None
+    if project.get("name") != "agent-memory":
+        return None
+    return candidate
 
 
 def _result_payload(result) -> dict[str, object]:
@@ -978,7 +1037,7 @@ def capture_turn(
 @app.command(
     help=(
         "Recall the highest-scoring memories for a query. "
-        "Results are ordered by descending path-product score from the query root."
+        "Results are ordered by descending parent-similarity score from the query root."
     )
 )
 def recall(
@@ -1007,17 +1066,20 @@ def recall(
     if as_json:
         _emit(payload, True)
         return
-    typer.echo("Root: query")
-    typer.echo(f"Top direct query similarity: {payload['seed_score']}")
-    for hit in payload["hits"]:
+    typer.echo(f'Recall for: "{payload["query"]}"')
+    for index, node in enumerate(payload["nodes"]):
+        if index:
+            typer.echo("")
         typer.echo(
-            f"  [{hit['score']}] {hit['memory_id']}  query={hit['query_similarity']}  {hit['preview']}"
+            f'{node["alias"]} <- {node["source"]}  similarity={node["source_similarity"]}'
         )
+        typer.echo(f'  {node["created_at"]}  {node["memory_id"]}')
+        typer.echo(f'  {node["text"]}')
 
 
 @app.command(
     help=(
-        "Report duplicate and overlap candidates without mutating stored memories."
+        "Report overlapping high-similarity memory clusters without mutating stored memories."
     )
 )
 def consolidate(
@@ -1038,11 +1100,84 @@ def consolidate(
     if as_json:
         _emit(payload, True)
         return
-    typer.echo(f"Duplicate groups: {len(payload['merged_groups'])}")
-    for group in payload["merged_groups"]:
-        typer.echo(f"  {' ~ '.join(group)}")
-    typer.echo(f"Overlap candidates kept separate: {len(payload['overlap_candidates'])}")
-    typer.echo(f"Remaining memories: {payload['remaining_memories']}")
+    typer.echo(
+        f"Clusters: {len(payload['clusters'])}  threshold={payload['threshold']}  "
+        f"clustered_memories={payload['clustered_memory_count']}/{payload['total_memories']}"
+    )
+    for cluster in payload["clusters"]:
+        typer.echo(
+            f"  {cluster['cluster_id']}  size={len(cluster['member_ids'])}  "
+            f"avg={cluster['average_similarity']}  max={cluster['max_similarity']}"
+        )
+        typer.echo(f"    members: {' ~ '.join(cluster['member_ids'])}")
+
+
+@app.command(
+    "consolidation-status",
+    help="Show the current daily memory consolidation scheduler state for this project."
+)
+def consolidation_status_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    payload = consolidation_status(load_project(cwd, exact=is_project_root(cwd)).root)
+    _emit(payload, as_json)
+
+
+@app.command(
+    "consolidation-start",
+    help="Mark today's memory consolidation workflow as started for this project."
+)
+def consolidation_start(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    payload = mark_consolidation_started(load_project(cwd, exact=is_project_root(cwd)).root)
+    _emit(payload, as_json)
+
+
+@app.command(
+    "consolidation-complete",
+    help="Mark today's memory consolidation workflow as completed for this project."
+)
+def consolidation_complete(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    payload = mark_consolidation_completed(load_project(cwd, exact=is_project_root(cwd)).root)
+    _emit(payload, as_json)
+
+
+@app.command(
+    "consolidation-approve",
+    help="Approve today's dry-run memory consolidation plan so the host LLM can apply the changes."
+)
+def consolidation_approve(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    payload = approve_consolidation_apply(load_project(cwd, exact=is_project_root(cwd)).root)
+    _emit(payload, as_json)
 
 
 @app.command(
@@ -1086,6 +1221,185 @@ def stats(
     finally:
         memory.close()
     _emit(payload, as_json)
+
+
+@app.command(
+    name="import-repo",
+    help=(
+        "Scan a source tree, chunk supported text/code files into memory-sized records, "
+        "and bulk import them into the current project store. Intended for bootstrapping "
+        "large repos such as EDS without hand-saving thousands of memories."
+    ),
+)
+def import_repo_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the initialized project store.",
+        resolve_path=True,
+    ),
+    root: Path | None = typer.Option(
+        None,
+        "--root",
+        help="Source tree to scan. Defaults to the current project root.",
+        resolve_path=True,
+    ),
+    max_memories: int = typer.Option(
+        3000,
+        "--max-memories",
+        min=1,
+        help="Stop after importing roughly this many new memories.",
+    ),
+    max_chunks_per_file: int = typer.Option(
+        6,
+        "--max-chunks-per-file",
+        min=1,
+        help="Prevent a few large files from dominating the import.",
+    ),
+    max_file_kb: int = typer.Option(
+        512,
+        "--max-file-kb",
+        min=1,
+        help="Skip files larger than this many KB.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    try:
+        result = import_repo_corpus(
+            cwd,
+            source_root=root,
+            max_memories=max_memories,
+            max_chunks_per_file=max_chunks_per_file,
+            max_file_bytes=max_file_kb * 1024,
+        )
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    payload = result.to_dict()
+    if as_json:
+        _emit(payload, True)
+        return
+
+    typer.echo(f"Project root: {payload['project_root']}")
+    typer.echo(f"Source root: {payload['source_root']}")
+    typer.echo(
+        f"Imported {payload['imported_memories']} memories from {payload['imported_files']} files "
+        f"(candidate_files={payload['candidate_files']}, discovered_files={payload['discovered_files']})."
+    )
+    typer.echo(f"Total memories: {payload['total_memories']}")
+    if payload["skipped_existing_texts"]:
+        typer.echo(f"Skipped existing identical texts: {payload['skipped_existing_texts']}")
+    component_counts = payload["component_counts"]
+    assert isinstance(component_counts, dict)
+    if component_counts:
+        typer.echo("Imported by component:")
+        for component, count in component_counts.items():
+            typer.echo(f"  {component}: {count}")
+
+
+@app.command(
+    name="reembed",
+    help=(
+        "Re-embed every memory in the current project store using the configured local embedding model. "
+        "This rewrites the database when the store's recorded embedding backend/model/dimensions differ "
+        "from the current config, or when --force is passed."
+    ),
+)
+def reembed_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Rebuild the store even if its recorded embedding settings already match the config.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    try:
+        result = reembed_project(
+            cwd,
+            exact=is_project_root(cwd),
+            force=force,
+        )
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    payload = result.to_dict()
+    if as_json:
+        _emit(payload, True)
+        return
+
+    if result.reembedded:
+        typer.echo(f"Re-embedded {result.memory_count} memories.")
+    else:
+        typer.echo("Store embeddings already match the current config.")
+    typer.echo(
+        "store: "
+        f"{result.previous_store_backend}/{result.previous_store_model}/{result.previous_store_dimensions}"
+    )
+    typer.echo(
+        "config: "
+        f"{result.current_store_backend}/{result.current_store_model}/{result.current_store_dimensions}"
+    )
+    if result.cache_prune is not None and result.cache_prune.pruned:
+        typer.echo(
+            f"Pruned {len(result.cache_prune.pruned)} cached model(s), "
+            f"freed {_format_bytes(result.cache_prune.freed_bytes)}."
+        )
+
+
+@app.command(
+    name="prune-model-cache",
+    help=(
+        "Delete stale fastembed model caches and keep only the embedding model configured for the current project. "
+        "Useful after a model switch or re-embed so old ONNX weights don't linger on disk."
+    ),
+)
+def prune_model_cache_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    try:
+        project = load_project(cwd, exact=is_project_root(cwd))
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if project.config.embedding_backend.lower() != "fastembed":
+        payload = {
+            "cache_dir": None,
+            "kept_models": [],
+            "pruned": [],
+            "freed_bytes": 0,
+            "details": f"No fastembed model cache to prune for backend `{project.config.embedding_backend}`.",
+        }
+        _emit(payload, as_json)
+        return
+
+    result = prune_fastembed_model_cache([project.config.embedding_model])
+    payload = result.to_dict()
+    if as_json:
+        _emit(payload, True)
+        return
+
+    typer.echo(f"Kept model cache: {project.config.embedding_model}")
+    typer.echo(f"Cache dir: {result.cache_dir}")
+    if not result.pruned:
+        typer.echo("No stale model caches found.")
+        return
+    typer.echo(
+        f"Pruned {len(result.pruned)} cached model(s), freed {_format_bytes(result.freed_bytes)}."
+    )
+    for entry in result.pruned:
+        typer.echo(f"  {entry.model_name or entry.hf_source or entry.path.name}")
 
 
 @app.command(
@@ -1197,7 +1511,10 @@ def smoke_test(
     reinstall_from: Path | None = typer.Option(
         None,
         "--reinstall-from",
-        help="Reinstall the current checkout into `uv tool` before the smoke test runs.",
+        help=(
+            "Reinstall the current checkout into `uv tool` before the smoke test runs. "
+            "Defaults to the current directory when run from the agent-memory source checkout."
+        ),
         resolve_path=True,
     ),
     keep_repo: bool = typer.Option(
@@ -1222,11 +1539,12 @@ def smoke_test(
         raise typer.BadParameter(
             f"smoke-test is POSIX-only and cannot run on this platform: {exc}"
         ) from exc
+    resolved_reinstall_from = reinstall_from or _default_smoke_reinstall_from()
     try:
         result = run_codex_smoke_test(
             project_root=project,
             destructive=destructive,
-            reinstall_from=reinstall_from,
+            reinstall_from=resolved_reinstall_from,
             keep_repo=keep_repo,
             timeout_seconds=timeout_seconds,
         )

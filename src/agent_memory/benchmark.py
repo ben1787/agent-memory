@@ -359,8 +359,8 @@ def build_benchmark_config(embedding_backend: str) -> MemoryConfig:
         )
     return MemoryConfig(
         embedding_backend="fastembed",
-        embedding_model="BAAI/bge-small-en-v1.5",
-        embedding_dimensions=384,
+        embedding_model="snowflake/snowflake-arctic-embed-m",
+        embedding_dimensions=768,
         duplicate_threshold=0.985,
         overlap_threshold=0.93,
     )

@@ -23,7 +23,7 @@ from agent_memory.benchmark import (
     parse_title,
     score_case,
 )
-from agent_memory.embeddings import Embedder, cosine_similarity
+from agent_memory.embeddings import Embedder, cosine_similarity, embed_documents, embed_query
 from agent_memory.engine import AgentMemory
 
 
@@ -64,7 +64,7 @@ class RawCorpusRetriever:
         self.embedder = embedder
 
     def retrieve(self, query: str, top_k: int) -> list[ContextItem]:
-        query_embedding = self.embedder.embed_text(query)
+        query_embedding = embed_query(self.embedder, query)
         scored: list[tuple[float, dict[str, object]]] = []
         for paragraph in self.paragraphs:
             similarity = cosine_similarity(query_embedding, paragraph["embedding"])
@@ -282,12 +282,12 @@ ANSWER_INSTRUCTIONS_SUFFIX = (
 
 
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
-# Reason: AgentMemory.save rejects text >1000 words. Wikipedia paragraphs
+# Reason: AgentMemory.save rejects text >250 words. Wikipedia paragraphs
 # occasionally exceed that (one in the cached corpus is 1243 words). Per
 # user instruction we don't lower or bypass the cap — instead we split
 # oversized paragraphs into roughly equal chunks at sentence boundaries
-# closest to target_words = ceil(words/1000) target.
-_MAX_PARAGRAPH_WORDS = 1000
+# closest to target_words = ceil(words/250) target.
+_MAX_PARAGRAPH_WORDS = 250
 
 
 def _split_paragraph_at_sentences(paragraph: str) -> list[str]:
@@ -359,7 +359,7 @@ def flatten_paragraphs(corpus: dict[str, list[str]], embedder: Embedder) -> list
                         "locator": locator,
                     }
                 )
-    embeddings = embedder.embed_texts(texts)
+    embeddings = embed_documents(embedder, texts)
     for paragraph, embedding in zip(paragraphs, embeddings):
         paragraph["embedding"] = embedding
     return paragraphs

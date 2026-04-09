@@ -176,12 +176,12 @@ def build_kernel_dataset(
 
 def materialize_hits(
     memory: AgentMemory,
-    ranked_scores: list[tuple[str, float]],
+    ranked_scores: list[tuple[str, float, str | None, float]],
     query_scores: dict[str, float],
     limit: int,
 ) -> list[MemoryHit]:
     hits: list[MemoryHit] = []
-    for memory_id, score in ranked_scores[:limit]:
+    for memory_id, score, _, _ in ranked_scores[:limit]:
         record = memory._memory_by_id[memory_id]
         hits.append(
             MemoryHit(

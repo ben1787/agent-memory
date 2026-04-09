@@ -17,7 +17,27 @@ It is designed to give agents a **persistent project memory** that survives acro
 
 ## Install
 
-The fastest path:
+### Claude Code plugin marketplace
+
+If you use Claude Code, the easiest install path is the plugin marketplace:
+
+```text
+/plugin marketplace add ben1787/agent-memory
+/plugin install agent-memory@agent-memory-plugins
+/reload-plugins
+```
+
+That gives Claude Code a plugin-managed `agent-memory` executable plus `/agent-memory:init` and `/agent-memory:doctor` skills. To initialize the current repo after installing the plugin, run:
+
+```text
+/agent-memory:init
+```
+
+The marketplace plugin pins a specific released `agent-memory` version and installs that exact release on first use. Updating the plugin moves users to a newer `agent-memory` release, and the plugin refreshes its managed binary to that pinned version on the next use so the bundle and installed binary stay in sync.
+
+### Standalone CLI install
+
+The fastest standalone path:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/ben1787/agent-memory/main/install.sh | sh
@@ -154,14 +174,14 @@ agent-memory init --with-mcp
 
 ## Retrieval algorithm
 
-`agent-memory recall` runs a lazy max-product graph traversal:
+`agent-memory recall` runs a lazy max-neighbor graph traversal:
 
 1. Embed the query.
 2. Treat the query as a temporary root node with direct similarity to every saved memory.
 3. Put those direct query scores into a max-heap.
-4. Repeatedly pop the best current path-product value, settle that memory, and enqueue only the next best unused neighbor from that settled memory.
+4. Repeatedly pop the best current parent-similarity value, settle that memory, and enqueue only the next best unused neighbor from that settled memory.
 5. Stop once the top `N` memories are settled.
-6. Return memories ordered by descending path-product score.
+6. Return memories ordered by descending parent-similarity score.
 
 This keeps retrieval parameter-light and avoids walking the whole graph when only the top hits matter.
 
@@ -169,8 +189,20 @@ This keeps retrieval parameter-light and avoids walking the whole graph when onl
 
 Two backends:
 
-- `fastembed` (default): semantic local embeddings via `BAAI/bge-small-en-v1.5`
+- `fastembed` (default): semantic local embeddings via `snowflake/snowflake-arctic-embed-m`
 - `hash`: deterministic fallback for tests and fully offline bootstrap
+
+When a project's configured embedding backend/model/dimensions change, Agent Memory records the store's previous embedding signature and automatically re-embeds the project store on the next open. Successful re-embeds also prune stale fastembed model caches, keeping only the active configured model. You can trigger the rebuild explicitly with:
+
+```bash
+agent-memory reembed
+```
+
+To prune stale fastembed model caches without forcing a re-embed:
+
+```bash
+agent-memory prune-model-cache
+```
 
 ## Development
 

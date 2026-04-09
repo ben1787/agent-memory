@@ -11,6 +11,19 @@ from agent_memory.engine import AgentMemory, open_memory_with_retry as open_memo
 
 
 HOOK_LOG_FILENAME = "hook-events.jsonl"
+CONSOLIDATION_STATE_FILENAME = "consolidation-state.json"
+
+_DEFAULT_CONSOLIDATION_STATE: dict[str, Any] = {
+    "pending_for_date": None,
+    "in_progress_for_date": None,
+    "completed_for_date": None,
+    "approved_for_date": None,
+    "execution_mode": "dry_run",
+    "last_scheduled_at": None,
+    "last_started_at": None,
+    "last_approved_at": None,
+    "last_completed_at": None,
+}
 
 
 def read_hook_input() -> dict[str, Any]:
@@ -23,6 +36,170 @@ def read_hook_input() -> dict[str, Any]:
 
 def _hook_log_path(project_root: Path) -> Path:
     return project_root / ".agent-memory" / HOOK_LOG_FILENAME
+
+
+def _consolidation_state_path(project_root: Path) -> Path:
+    return project_root / ".agent-memory" / CONSOLIDATION_STATE_FILENAME
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _local_today() -> str:
+    return datetime.now().astimezone().date().isoformat()
+
+
+def read_consolidation_state(project_root: Path) -> dict[str, Any]:
+    path = _consolidation_state_path(project_root)
+    if not path.exists():
+        return dict(_DEFAULT_CONSOLIDATION_STATE)
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError:
+        return dict(_DEFAULT_CONSOLIDATION_STATE)
+    if not isinstance(payload, dict):
+        return dict(_DEFAULT_CONSOLIDATION_STATE)
+    state = dict(_DEFAULT_CONSOLIDATION_STATE)
+    for key in state:
+        state[key] = payload.get(key)
+    return state
+
+
+def write_consolidation_state(project_root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    path = _consolidation_state_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(_DEFAULT_CONSOLIDATION_STATE)
+    for key in payload:
+        payload[key] = state.get(key)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
+    return payload
+
+
+def consolidation_status(project_root: Path) -> dict[str, Any]:
+    state = read_consolidation_state(project_root)
+    today = _local_today()
+    is_pending_today = state.get("pending_for_date") == today
+    is_in_progress_today = state.get("in_progress_for_date") == today
+    is_completed_today = state.get("completed_for_date") == today
+    return {
+        **state,
+        "today": today,
+        "is_pending_today": is_pending_today,
+        "is_in_progress_today": is_in_progress_today,
+        "is_completed_today": is_completed_today,
+        "is_approved_today": state.get("approved_for_date") == today,
+        "requires_approval": (is_pending_today or is_in_progress_today) and state.get("execution_mode") != "apply",
+    }
+
+
+def schedule_daily_consolidation(project_root: Path) -> dict[str, Any]:
+    state = read_consolidation_state(project_root)
+    today = _local_today()
+    scheduled = False
+    if (
+        state.get("pending_for_date") != today
+        and state.get("in_progress_for_date") != today
+        and state.get("completed_for_date") != today
+    ):
+        state["pending_for_date"] = today
+        state["approved_for_date"] = None
+        state["execution_mode"] = "dry_run"
+        state["last_scheduled_at"] = _utc_now()
+        scheduled = True
+        write_consolidation_state(project_root, state)
+    return {
+        "scheduled": scheduled,
+        **consolidation_status(project_root),
+    }
+
+
+def mark_consolidation_started(project_root: Path) -> dict[str, Any]:
+    state = read_consolidation_state(project_root)
+    today = _local_today()
+    if state.get("completed_for_date") == today:
+        return {
+            "status": "already_completed",
+            **consolidation_status(project_root),
+        }
+    state["pending_for_date"] = today
+    state["in_progress_for_date"] = today
+    state["last_started_at"] = _utc_now()
+    write_consolidation_state(project_root, state)
+    return {
+        "status": "started",
+        **consolidation_status(project_root),
+    }
+
+
+def approve_consolidation_apply(project_root: Path) -> dict[str, Any]:
+    state = read_consolidation_state(project_root)
+    today = _local_today()
+    if state.get("completed_for_date") == today:
+        return {
+            "status": "already_completed",
+            **consolidation_status(project_root),
+        }
+    state["pending_for_date"] = today
+    state["approved_for_date"] = today
+    state["execution_mode"] = "apply"
+    state["last_approved_at"] = _utc_now()
+    write_consolidation_state(project_root, state)
+    return {
+        "status": "approved",
+        **consolidation_status(project_root),
+    }
+
+
+def mark_consolidation_completed(project_root: Path) -> dict[str, Any]:
+    state = read_consolidation_state(project_root)
+    today = _local_today()
+    state["pending_for_date"] = None
+    state["in_progress_for_date"] = None
+    state["completed_for_date"] = today
+    state["last_completed_at"] = _utc_now()
+    write_consolidation_state(project_root, state)
+    return {
+        "status": "completed",
+        **consolidation_status(project_root),
+    }
+
+
+def pending_consolidation_instruction(project_root: Path) -> str | None:
+    status = consolidation_status(project_root)
+    if status["is_completed_today"]:
+        return None
+    if not status["is_pending_today"] and not status["is_in_progress_today"]:
+        return None
+    if status["execution_mode"] == "apply":
+        return (
+            "Daily memory consolidation for this project has been approved for application.\n"
+            "- If your client exposes the Agent Memory consolidation skill, use it now. "
+            "In Claude plugin setups, that skill is `/agent-memory:consolidate`.\n"
+            "- If your client supports delegation, you may run the consolidation skill in a subagent.\n"
+            "- If you have not started yet, run `agent-memory consolidation-start`.\n"
+            "- Inspect `agent-memory consolidate --json` and then apply the approved cleanup using "
+            "`agent-memory delete`, `agent-memory edit`, and `agent-memory save`.\n"
+            "- When the approved changes are done, run `agent-memory consolidation-complete`."
+        )
+    return (
+        "Daily memory consolidation is due for this project.\n"
+        "- If your client exposes the Agent Memory consolidation skill, use it now. "
+        "In Claude plugin setups, that skill is `/agent-memory:consolidate`.\n"
+        "- If your client supports delegation, you may run the consolidation skill in a subagent.\n"
+        "- Start the workflow with `agent-memory consolidation-start`.\n"
+        "- Inspect `agent-memory consolidate --json`, which reports overlapping similarity clusters at cosine "
+        "similarity >= 0.92.\n"
+        "- This run is in dry-run mode during testing. Do not mutate memories yet.\n"
+        "- For each cluster, decide whether to keep it as-is or propose replacing it with fewer, more orthogonal "
+        "memories.\n"
+        "- Report the proposed `agent-memory delete`, `agent-memory edit`, and `agent-memory save` actions and "
+        "their expected results, but do not run them until approved.\n"
+        "- If the user approves the proposed changes, run `agent-memory consolidation-approve` and then carry out "
+        "the approved edits.\n"
+        "- Do not do contradiction resolution or timestamp-based truth arbitration in this pass.\n"
+        "- After the eventual approved apply pass, run `agent-memory consolidation-complete`."
+    )
 
 
 def hook_log_entries(project_root: Path) -> list[dict[str, Any]]:
@@ -67,6 +244,30 @@ def project_root_from_env_or_cwd(cwd: str | None = None) -> Path:
     if cwd:
         return Path(cwd).resolve()
     return Path.cwd()
+
+
+def sync_prompt_artifacts(project_root: Path) -> None:
+    config_path = project_root / ".agent-memory" / "config.json"
+    if not config_path.exists():
+        return
+
+    try:
+        from agent_memory.config import default_instructions
+
+        instructions_path = project_root / ".agent-memory" / "instructions.md"
+        desired = default_instructions()
+        if not instructions_path.exists() or instructions_path.read_text(encoding='utf-8') != desired:
+            instructions_path.parent.mkdir(parents=True, exist_ok=True)
+            instructions_path.write_text(desired, encoding='utf-8')
+    except Exception:
+        pass
+
+    try:
+        from agent_memory.integration import install_memory_instructions
+
+        install_memory_instructions(project_root)
+    except Exception:
+        pass
 
 
 def truncate_words(text: str, limit: int) -> str:

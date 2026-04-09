@@ -7,9 +7,21 @@ a `v*` tag — no manual steps.
 ## Cutting a release (the normal flow)
 
 ```bash
-# Bump the version in pyproject.toml and src/agent_memory/__init__.py first.
-# Both must agree.
-git add pyproject.toml src/agent_memory/__init__.py
+# Bump the package version first (PEP 440 form, e.g. 0.2.0rc1).
+# These files must stay in sync:
+#   pyproject.toml
+#   src/agent_memory/versioning.py
+#   .claude-plugin/marketplace.json
+#   plugins/agent-memory/.claude-plugin/plugin.json
+#   plugins/agent-memory/release-version.txt
+#
+# The git tag / GitHub release stays in release-tag form:
+#   package version: 0.2.0rc1
+#   release tag:     v0.2.0-rc.1
+git add pyproject.toml src/agent_memory/versioning.py \
+  .claude-plugin/marketplace.json \
+  plugins/agent-memory/.claude-plugin/plugin.json \
+  plugins/agent-memory/release-version.txt
 git commit -m "Bump to vX.Y.Z"
 
 # Tag and push.
@@ -54,7 +66,9 @@ Before tagging:
 - [ ] `pyinstaller pyinstaller/agent-memory.spec --clean --noconfirm` builds
       successfully and `./dist/agent-memory/agent-memory --version` prints
       the new version
-- [ ] `pyproject.toml` and `src/agent_memory/__init__.py` agree on the version
+- [ ] `uv run pytest tests/test_upgrade.py tests/test_versioning.py -q` is green
+- [ ] `pyproject.toml` and `src/agent_memory/versioning.py` agree on the package version
+- [ ] `.claude-plugin/marketplace.json`, `plugins/agent-memory/.claude-plugin/plugin.json`, and `plugins/agent-memory/release-version.txt` match the current release
 - [ ] You've smoke-tested `agent-memory init` + `save` + `recall` against a
       throwaway directory using the freshly-built binary
 

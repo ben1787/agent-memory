@@ -1,0 +1,38 @@
+{
+  "name": "agent-memory-plugins",
+  "owner": {
+    "name": "Ben",
+    "email": "ben@equitydatascience.com"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for installing and using Agent Memory.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "agent-memory",
+      "source": "./plugins/agent-memory",
+      "description": "Installs the agent-memory CLI inside Claude Code and adds setup and debugging skills for persistent project memory.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Ben",
+        "email": "ben@equitydatascience.com"
+      },
+      "homepage": "https://github.com/ben1787/agent-memory",
+      "repository": "https://github.com/ben1787/agent-memory",
+      "license": "MIT",
+      "keywords": [
+        "agent-memory",
+        "memory",
+        "mcp",
+        "claude-code"
+      ],
+      "category": "developer-tools",
+      "tags": [
+        "memory",
+        "project-memory",
+        "setup"
+      ]
+    }
+  ]
+}

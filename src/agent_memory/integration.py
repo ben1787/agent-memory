@@ -34,15 +34,15 @@ This project has **Agent Memory** installed at `.agent-memory/` — a project-sc
 
 You access it through the `agent-memory` CLI, invoked via your shell tool (Bash or equivalent). There is no MCP server to wire up — just the CLI.
 
-### Recall before non-trivial work
+### Recall when useful
 
-Before starting any non-trivial task — debugging, implementing, refactoring, exploring an unfamiliar area — ask yourself: *"Has prior work in this repo already discovered something that would change how I approach this?"* If even a little, recall first:
+If the answer is not already clear from the current context or code, ask yourself: *"Has prior work in this repo already discovered something that would change how I approach this?"* If yes, do a quick recall before broader research:
 
 ```
 agent-memory recall <task-shaped query>
 ```
 
-Phrase the query the way the answer would phrase itself, not the way a question would. ✅ `"factor model nexus repository pattern"`  ❌ `"how do I add a factor model"`. Recall is cheap; do it.
+Phrase the query the way the answer would phrase itself, not the way a question would. ✅ `"factor model nexus repository pattern"`  ❌ `"how do I add a factor model"`.
 
 ### Save when something durable surfaced
 
@@ -885,6 +885,11 @@ def install_claude_hooks(
         "command": _shell_command_for_hook(project_root, "claude-user-prompt-submit"),
         "timeout": 10,
     }
+    stop_hook = {
+        "type": "command",
+        "command": _shell_command_for_hook(project_root, "claude-stop-capture"),
+        "timeout": 10,
+    }
     # Drop ALL prior agent-memory hook command shapes before re-merging the
     # current desired form. The substring `_hook claude-user-prompt-submit`
     # matches both broken intermediate forms (no-PATH-prefix) and the current
@@ -908,6 +913,7 @@ def install_claude_hooks(
             "_hook claude-stop-capture",
         ],
     ) or changed
+    changed = _merge_hook(payload, "Stop", stop_hook) or changed
 
     if not changed and settings_path.exists():
         return IntegrationResult(
@@ -920,7 +926,7 @@ def install_claude_hooks(
     return IntegrationResult(
         path=settings_path,
         status="created" if not existed else "updated",
-        details="Installed Claude local prompt hook for memory reminders and recall guidance.",
+        details="Installed Claude local prompt and Stop hooks for memory reminders, turn capture, and daily consolidation scheduling.",
     )
 
 
@@ -1202,6 +1208,12 @@ def install_codex_hooks(project_root: Path) -> IntegrationResult:
         "timeout": 10,
         "statusMessage": "Recalling project memory",
     }
+    stop_hook = {
+        "type": "command",
+        "command": _shell_command_for_hook(project_root, "codex-stop-capture"),
+        "timeout": 10,
+        "statusMessage": "Capturing project memory",
+    }
     # Drop ALL prior agent-memory hook command shapes before re-merging the
     # canonical form. See install_claude_hooks for the rationale — same logic.
     changed = _remove_hook_commands(
@@ -1221,6 +1233,7 @@ def install_codex_hooks(project_root: Path) -> IntegrationResult:
             "_hook codex-stop-capture",
         ],
     ) or changed
+    changed = _merge_event_hook(payload, "Stop", stop_hook) or changed
     payload = _prune_hook_payload(payload)
 
     if not changed and existed:
@@ -1234,7 +1247,7 @@ def install_codex_hooks(project_root: Path) -> IntegrationResult:
     return IntegrationResult(
         path=hooks_path,
         status="created" if not existed else "updated",
-        details="Installed Codex repo-local prompt hook for memory reminders and recall guidance.",
+        details="Installed Codex repo-local prompt and Stop hooks for memory reminders, turn capture, and daily consolidation scheduling.",
     )
 
 

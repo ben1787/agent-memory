@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from agent_memory.cli import app
 from agent_memory.config import MemoryConfig, init_project
+from agent_memory.hooks.common import schedule_daily_consolidation
 
 
 def _python_module_cmd(module: str) -> list[str]:
@@ -44,6 +45,61 @@ def test_claude_user_prompt_submit_returns_additional_context(tmp_path: Path) ->
     # CLI-only — must not steer the agent at MCP tool calls.
     assert "save_memory" not in context
     assert "recall_memories" not in context
+
+
+def test_claude_user_prompt_submit_injects_consolidation_instruction_when_due(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    schedule_daily_consolidation(tmp_path)
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": str(tmp_path),
+        "prompt": "continue working",
+    }
+    env = os.environ | {"AGENT_MEMORY_PROJECT_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        _python_module_cmd("agent_memory.hooks.claude_user_prompt_submit"),
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=True,
+    )
+
+    output = json.loads(result.stdout)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "Daily memory consolidation is due" in context
+    assert "agent-memory consolidate --json" in context
+    assert "agent-memory consolidation-start" in context
+    assert "dry-run mode" in context
+    assert "consolidation-approve" in context
+    assert "agent-memory consolidation-complete" in context
+
+
+def test_claude_user_prompt_submit_switches_to_apply_instruction_after_approval(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    schedule_daily_consolidation(tmp_path)
+    from agent_memory.hooks.common import approve_consolidation_apply
+
+    approve_consolidation_apply(tmp_path)
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": str(tmp_path),
+        "prompt": "continue working",
+    }
+    env = os.environ | {"AGENT_MEMORY_PROJECT_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        _python_module_cmd("agent_memory.hooks.claude_user_prompt_submit"),
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=True,
+    )
+
+    output = json.loads(result.stdout)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "approved for application" in context
+    assert "dry-run mode" not in context
 
 
 def test_hook_dispatch_via_internal_subcommand_runs_claude_handler(tmp_path: Path) -> None:

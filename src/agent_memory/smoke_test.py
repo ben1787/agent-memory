@@ -584,8 +584,8 @@ def run_codex_smoke_test(
             )
 
         recall_payload = _recall(repo_root, "billing webhook handler")
-        hits = recall_payload.get("hits") or []
-        recall_top_hit = hits[0]["text"] if hits else None
+        nodes = recall_payload.get("nodes") or []
+        recall_top_hit = nodes[0]["text"] if nodes else None
         if recall_top_hit != EXPECTED_MEMORY:
             raise SmokeTestError(f"Unexpected recall top hit: {recall_top_hit!r}")
 

@@ -32,7 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_memory import __version__
+from agent_memory import __display_version__, __version__
+from agent_memory.versioning import version_key
 
 
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repo}/releases/latest"
@@ -77,21 +78,14 @@ def _http_get(url: str, *, accept: str | None = None) -> bytes:
     request = urllib.request.Request(url)
     if accept:
         request.add_header("Accept", accept)
-    request.add_header("User-Agent", f"agent-memory/{__version__}")
+    request.add_header("User-Agent", f"agent-memory/{__display_version__}")
     with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
         return response.read()
 
 
 def _parse_version(tag: str) -> tuple[int, ...]:
-    """Parse 'v1.2.3' or '1.2.3' into a comparable tuple."""
-    cleaned = tag.lstrip("v").split("-", 1)[0]
-    parts = []
-    for chunk in cleaned.split("."):
-        try:
-            parts.append(int(chunk))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts)
+    """Parse release tags and package versions into a comparable tuple."""
+    return version_key(tag)
 
 
 @dataclass(slots=True)
@@ -153,7 +147,7 @@ def check_for_upgrade_in_background(*, repo: str = DEFAULT_REPO) -> str | None:
         if isinstance(latest_tag, str) and latest_tag:
             current = _parse_version(__version__)
             if _parse_version(latest_tag) > current:
-                return f"agent-memory {latest_tag} is available (you have {__version__}). Run `agent-memory upgrade` to update."
+                return f"agent-memory {latest_tag} is available (you have {__display_version__}). Run `agent-memory upgrade` to update."
         return None
 
     # Cache miss or stale → refresh.
@@ -171,7 +165,7 @@ def check_for_upgrade_in_background(*, repo: str = DEFAULT_REPO) -> str | None:
         return None
     if latest.version_tuple <= _parse_version(__version__):
         return None
-    return f"agent-memory {latest.tag} is available (you have {__version__}). Run `agent-memory upgrade` to update."
+    return f"agent-memory {latest.tag} is available (you have {__display_version__}). Run `agent-memory upgrade` to update."
 
 
 def perform_upgrade(*, repo: str = DEFAULT_REPO) -> dict[str, Any]:
@@ -203,9 +197,9 @@ def perform_upgrade(*, repo: str = DEFAULT_REPO) -> dict[str, Any]:
     if latest.version_tuple <= current_tuple:
         return {
             "status": "up-to-date",
-            "current_version": __version__,
+            "current_version": __display_version__,
             "latest_version": latest.tag,
-            "details": f"Already on the latest version ({__version__}).",
+            "details": f"Already on the latest version ({__display_version__}).",
         }
 
     target_path = _resolve_running_binary_path()
@@ -272,10 +266,10 @@ def perform_upgrade(*, repo: str = DEFAULT_REPO) -> dict[str, Any]:
 
     return {
         "status": "upgraded",
-        "previous_version": __version__,
+        "previous_version": __display_version__,
         "new_version": latest.tag,
         "binary_path": str(target_path),
-        "details": f"Upgraded agent-memory from {__version__} to {latest.tag}.",
+        "details": f"Upgraded agent-memory from {__display_version__} to {latest.tag}.",
     }
 
 

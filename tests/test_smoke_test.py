@@ -122,3 +122,43 @@ def test_smoke_test_command_prints_json(monkeypatch) -> None:
     payload = json.loads(result.stdout)
     assert payload["post_save_memory_count"] == 2
     assert payload["read_path_verified"] is True
+
+
+def test_smoke_test_defaults_reinstall_from_source_checkout(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    (tmp_path / "src" / "agent_memory").mkdir(parents=True)
+    (tmp_path / "src" / "agent_memory" / "cli.py").write_text("# marker\n", encoding='utf-8')
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "agent-memory"\nversion = "0.1.0"\n',
+        encoding='utf-8',
+    )
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict[str, object] = {}
+
+    def _fake_run_codex_smoke_test(**kwargs):
+        seen.update(kwargs)
+        return SmokeTestResult(
+            repo_root="/tmp/repo",
+            first_session_file="/tmp/first-session.jsonl",
+            second_session_file="/tmp/second-session.jsonl",
+            used_temp_repo=True,
+            uninstall_verified=True,
+            baseline_memory_count=0,
+            post_save_memory_count=2,
+            hook_event_count=8,
+            first_pre_submit_verified=True,
+            second_pre_submit_verified=True,
+            save_path_verified=True,
+            read_path_verified=True,
+            recall_top_hit="The billing webhook handler lives in services/billing/webhooks.py.",
+            first_final_answer="saved",
+            second_final_answer="services/billing/webhooks.py",
+        )
+
+    monkeypatch.setattr("agent_memory.smoke_test.run_codex_smoke_test", _fake_run_codex_smoke_test)
+
+    result = runner.invoke(app, ["smoke-test", "--json"])
+
+    assert result.exit_code == 0
+    assert seen["reinstall_from"] == tmp_path.resolve()

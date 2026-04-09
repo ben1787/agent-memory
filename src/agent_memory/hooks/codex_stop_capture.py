@@ -11,6 +11,7 @@ from agent_memory.hooks.common import (
     open_memory_with_retry,
     project_root_from_env_or_cwd,
     read_hook_input,
+    schedule_daily_consolidation,
     summarize_hook_payload,
     truncate_words,
 )
@@ -26,6 +27,19 @@ def main() -> None:
             hook_name="codex_stop_capture",
             action="start",
             payload=hook_summary,
+        )
+        consolidation = schedule_daily_consolidation(project_root)
+        log_hook_event(
+            project_root,
+            hook_name="codex_stop_capture",
+            action="consolidation_scheduled" if consolidation["scheduled"] else "consolidation_unchanged",
+            payload={
+                **hook_summary,
+                "today": consolidation["today"],
+                "pending_for_date": consolidation["pending_for_date"],
+                "in_progress_for_date": consolidation["in_progress_for_date"],
+                "completed_for_date": consolidation["completed_for_date"],
+            },
         )
 
         user_text = None

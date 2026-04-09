@@ -7,15 +7,17 @@ import traceback
 
 from agent_memory.hooks.common import (
     log_hook_event,
+    pending_consolidation_instruction,
     project_root_from_env_or_cwd,
     read_hook_input,
+    sync_prompt_artifacts,
     summarize_hook_payload,
     truncate_words,
 )
 
 
 INSTRUCTION = """Agent Memory:
-- Before answering anything non-trivial, run `agent-memory recall <task-shaped query>` via your shell tool to check for prior project knowledge. Phrase the query like the answer would, not like a question.
+- If the answer is not already clear from the current context or code, consider a quick `agent-memory recall <task-shaped query>` before broader research. Phrase the query like the answer would, not like a question.
 - After the work, decide whether you learned 0-3 durable things future-you would want without re-reading this conversation. If yes, save them with `agent-memory save "<memory>" "<memory>"`. For memories with quotes/newlines, pipe via `agent-memory save --stdin`.
 - Save only stable, useful project knowledge: decisions and the *why*, file locations, gotchas, user preferences, cross-component relationships, external system pointers.
 - Do not save noise, generic programming knowledge, transcript dumps, or anything already in AGENTS.md/CLAUDE.md.
@@ -30,6 +32,7 @@ def main() -> None:
             return
 
         project_root = project_root_from_env_or_cwd(payload.get("cwd"))
+        sync_prompt_artifacts(project_root)
         hook_summary = summarize_hook_payload(payload)
         log_hook_event(
             project_root,
@@ -38,6 +41,9 @@ def main() -> None:
             payload=hook_summary,
         )
         additional_context = INSTRUCTION
+        consolidation_instruction = pending_consolidation_instruction(project_root)
+        if consolidation_instruction:
+            additional_context = f"{additional_context}\n\n{consolidation_instruction}"
         log_hook_event(
             project_root,
             hook_name="codex_user_prompt_submit",
