@@ -26,6 +26,7 @@ DEFAULT_MODEL = "snowflake/snowflake-arctic-embed-m"
 DEFAULT_DIMENSIONS = 768
 DEFAULT_MAX_MEMORY_WORDS = 250
 DEFAULT_PROMPT_CONTEXT_TURN_INTERVAL = 10
+DEFAULT_AUTO_UPGRADE = True
 
 
 @dataclass(slots=True)
@@ -40,6 +41,7 @@ class MemoryConfig:
     integration_version: str | None = None
     max_memory_words: int = DEFAULT_MAX_MEMORY_WORDS
     prompt_context_turn_interval: int = DEFAULT_PROMPT_CONTEXT_TURN_INTERVAL
+    auto_upgrade: bool = DEFAULT_AUTO_UPGRADE
     duplicate_threshold: float = 0.97
     overlap_threshold: float = 0.90
     lexical_duplicate_threshold: float = 0.95
@@ -101,6 +103,7 @@ class MemoryConfig:
         data.setdefault("stored_embedding_dimensions", original_dimensions)
         data.setdefault("integration_version", None)
         data.setdefault("prompt_context_turn_interval", DEFAULT_PROMPT_CONTEXT_TURN_INTERVAL)
+        data.setdefault("auto_upgrade", DEFAULT_AUTO_UPGRADE)
 
         if version < CURRENT_CONFIG_VERSION:
             if (

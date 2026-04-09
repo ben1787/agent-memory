@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+import os
 import re
 import shutil
 import subprocess
@@ -106,12 +107,35 @@ def _main_callback(
 ) -> None:
     """Top-level callback so `agent-memory --version` works without a subcommand.
     Also where we plug in the non-blocking 24h staleness check."""
+    auto_upgrade_enabled = os.environ.get("AGENT_MEMORY_DISABLE_AUTO_UPGRADE") != "1"
+    if len(sys.argv) > 1 and sys.argv[1] == "_hook":
+        auto_upgrade_enabled = False
+
+    project = None
+    if auto_upgrade_enabled:
+        try:
+            project = load_project(Path.cwd())
+            if not project.config.auto_upgrade:
+                auto_upgrade_enabled = False
+        except ConfigError:
+            project = None
+
     # Lazy import to keep cold-start fast for hot-path commands.
     try:
-        from agent_memory.upgrade import check_for_upgrade_in_background
+        from agent_memory.upgrade import check_for_upgrade_in_background, perform_upgrade
 
         notice = check_for_upgrade_in_background()
-        if notice:
+        if notice and auto_upgrade_enabled:
+            result = perform_upgrade()
+            if result.get("status") == "upgraded":
+                binary_path = result.get("binary_path")
+                if isinstance(binary_path, str) and binary_path:
+                    os.environ["AGENT_MEMORY_DISABLE_AUTO_UPGRADE"] = "1"
+                    os.execv(binary_path, [binary_path, *sys.argv[1:]])
+            elif notice:
+                # Print to stderr so it never pollutes JSON output.
+                typer.echo(notice, err=True)
+        elif notice:
             # Print to stderr so it never pollutes JSON output.
             typer.echo(notice, err=True)
     except Exception:
