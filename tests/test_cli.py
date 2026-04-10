@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from agent_memory.cli import _codex_feature_state, _doctor_payload, app
@@ -202,6 +204,9 @@ def test_uninstall_remove_store_deletes_project_memory_data(tmp_path: Path) -> N
 
 
 def test_uninstall_all_removes_project_and_machine_artifacts(monkeypatch, tmp_path: Path) -> None:
+    if sys.platform.startswith("win"):
+        pytest.skip("clean-room uninstall test exercises POSIX shell rc cleanup")
+
     runner = CliRunner()
     home = tmp_path / "home"
     home.mkdir()
