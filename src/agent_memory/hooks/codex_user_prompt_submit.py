@@ -39,14 +39,6 @@ Storing memories:
 Reading memories:
   - If the answer isn’t clear from context or code, consider `agent-memory recall <task-shaped query>` before manual searching through files or the internet."""
 
-INSTRUCTION_BRIEF = """Agent Memory
-
-Storing memories:
-  Consider saving memories when appropriate; follow the detailed guidelines and keep them durable, repo-specific, and concise.
-
-Reading memories:
-  If the answer isn’t clear from context or code, consider `agent-memory recall <task-shaped query>` before manual searching through files or the internet."""
-
 DEFAULT_CONTEXT_INTERVAL = 10
 
 
@@ -60,7 +52,7 @@ def _parse_turn_id(raw: object) -> int | None:
     return None
 
 
-def _should_inject_full(turn_id: int | None, interval: int) -> bool:
+def _should_inject_context(turn_id: int | None, interval: int) -> bool:
     if interval <= 1:
         return True
     if turn_id is None:
@@ -68,11 +60,17 @@ def _should_inject_full(turn_id: int | None, interval: int) -> bool:
     return (turn_id - 1) % interval == 0
 
 
+def _emit_noop() -> None:
+    sys.stdout.write("{}")
+    sys.stdout.flush()
+
+
 def main() -> None:
     try:
         payload = read_hook_input()
         prompt = str(payload.get("prompt") or "").strip()
         if not prompt:
+            _emit_noop()
             return
 
         project_root = project_root_from_env_or_cwd(payload.get("cwd"))
@@ -90,7 +88,21 @@ def main() -> None:
             interval = max(1, int(getattr(config, "prompt_context_turn_interval", DEFAULT_CONTEXT_INTERVAL)))
 
         turn_id = _parse_turn_id(payload.get("turn_id"))
-        additional_context = INSTRUCTION_FULL if _should_inject_full(turn_id, interval) else INSTRUCTION_BRIEF
+        if not _should_inject_context(turn_id, interval):
+            log_hook_event(
+                project_root,
+                hook_name="codex_user_prompt_submit",
+                action="skip_context",
+                payload={
+                    **hook_summary,
+                    "interval": interval,
+                    "reason": "non_interval_turn",
+                },
+            )
+            _emit_noop()
+            return
+
+        additional_context = INSTRUCTION_FULL
         consolidation_instruction = pending_consolidation_instruction(project_root)
         if consolidation_instruction:
             additional_context = f"{additional_context}\n\n{consolidation_instruction}"
@@ -131,6 +143,7 @@ def main() -> None:
             pass
         if os.environ.get("AGENT_MEMORY_DEBUG_HOOKS") == "1":
             traceback.print_exc(file=sys.stderr)
+        _emit_noop()
 
 
 if __name__ == "__main__":

@@ -56,7 +56,6 @@ from agent_memory.hooks.common import (
     consolidation_status,
     hook_log_entries,
     mark_consolidation_completed,
-    mark_consolidation_started,
 )
 
 
@@ -1152,7 +1151,7 @@ def consolidate(
 
 @app.command(
     "consolidation-status",
-    help="Show the current daily memory consolidation scheduler state for this project."
+    help="Show the current daily memory consolidation status for this project."
 )
 def consolidation_status_command(
     cwd: Path = typer.Option(
@@ -1168,25 +1167,8 @@ def consolidation_status_command(
 
 
 @app.command(
-    "consolidation-start",
-    help="Mark today's memory consolidation workflow as started for this project."
-)
-def consolidation_start(
-    cwd: Path = typer.Option(
-        Path("."),
-        "--cwd",
-        help="Project directory or any path inside the project.",
-        resolve_path=True,
-    ),
-    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
-) -> None:
-    payload = mark_consolidation_started(load_project(cwd, exact=is_project_root(cwd)).root)
-    _emit(payload, as_json)
-
-
-@app.command(
     "consolidation-complete",
-    help="Mark today's memory consolidation workflow as completed for this project."
+    help="Record today's date as the last completed memory consolidation for this project."
 )
 def consolidation_complete(
     cwd: Path = typer.Option(

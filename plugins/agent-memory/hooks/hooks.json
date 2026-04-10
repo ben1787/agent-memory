@@ -21,17 +21,6 @@
           }
         ]
       }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/claude-stop-capture.sh",
-            "timeout": 10
-          }
-        ]
-      }
     ]
   }
 }

@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 from agent_memory.cli import app
 from agent_memory.config import MemoryConfig, init_project
-from agent_memory.hooks.common import schedule_daily_consolidation
+from agent_memory.hooks.common import mark_consolidation_completed
 
 
 def _python_module_cmd(module: str) -> list[str]:
@@ -20,6 +20,7 @@ def _python_module_cmd(module: str) -> list[str]:
 
 def test_claude_user_prompt_submit_returns_additional_context(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    mark_consolidation_completed(tmp_path)
     payload = {
         "hook_event_name": "UserPromptSubmit",
         "cwd": str(tmp_path),
@@ -49,7 +50,6 @@ def test_claude_user_prompt_submit_returns_additional_context(tmp_path: Path) ->
 
 def test_claude_user_prompt_submit_injects_consolidation_instruction_when_due(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
-    schedule_daily_consolidation(tmp_path)
     payload = {
         "hook_event_name": "UserPromptSubmit",
         "cwd": str(tmp_path),
@@ -67,10 +67,29 @@ def test_claude_user_prompt_submit_injects_consolidation_instruction_when_due(tm
 
     output = json.loads(result.stdout)
     context = output["hookSpecificOutput"]["additionalContext"]
-    assert "Daily memory consolidation is due" in context
-    assert "agent-memory consolidate --json" in context
-    assert "agent-memory consolidation-start" in context
-    assert "agent-memory consolidation-complete" in context
+    assert "Agent Memory daily consolidation is due." in context
+    assert "Run the daily consolidation skill, ideally in a sub-agent" in context
+
+
+def test_claude_user_prompt_submit_skips_non_interval_turns(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": str(tmp_path),
+        "turn_id": "turn-2",
+        "prompt": "continue working",
+    }
+    env = os.environ | {"AGENT_MEMORY_PROJECT_ROOT": str(tmp_path)}
+    result = subprocess.run(
+        _python_module_cmd("agent_memory.hooks.claude_user_prompt_submit"),
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=True,
+    )
+
+    assert json.loads(result.stdout) == {}
 
 
 def test_hook_dispatch_via_internal_subcommand_runs_claude_handler(tmp_path: Path) -> None:

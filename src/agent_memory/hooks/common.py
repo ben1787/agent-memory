@@ -14,12 +14,7 @@ HOOK_LOG_FILENAME = "hook-events.jsonl"
 CONSOLIDATION_STATE_FILENAME = "consolidation-state.json"
 
 _DEFAULT_CONSOLIDATION_STATE: dict[str, Any] = {
-    "pending_for_date": None,
-    "in_progress_for_date": None,
-    "completed_for_date": None,
-    "last_scheduled_at": None,
-    "last_started_at": None,
-    "last_completed_at": None,
+    "last_consolidation_date": None,
 }
 
 
@@ -39,10 +34,6 @@ def _consolidation_state_path(project_root: Path) -> Path:
     return project_root / ".agent-memory" / CONSOLIDATION_STATE_FILENAME
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _local_today() -> str:
     return datetime.now().astimezone().date().isoformat()
 
@@ -57,18 +48,25 @@ def read_consolidation_state(project_root: Path) -> dict[str, Any]:
         return dict(_DEFAULT_CONSOLIDATION_STATE)
     if not isinstance(payload, dict):
         return dict(_DEFAULT_CONSOLIDATION_STATE)
-    state = dict(_DEFAULT_CONSOLIDATION_STATE)
-    for key in state:
-        state[key] = payload.get(key)
-    return state
+    last_consolidation_date = payload.get("last_consolidation_date")
+    if not isinstance(last_consolidation_date, str) or not last_consolidation_date.strip():
+        legacy_date = payload.get("completed_for_date")
+        if isinstance(legacy_date, str) and legacy_date.strip():
+            last_consolidation_date = legacy_date.strip()
+        else:
+            last_consolidation_date = None
+    return {
+        "last_consolidation_date": last_consolidation_date,
+    }
 
 
 def write_consolidation_state(project_root: Path, state: dict[str, Any]) -> dict[str, Any]:
     path = _consolidation_state_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = dict(_DEFAULT_CONSOLIDATION_STATE)
-    for key in payload:
-        payload[key] = state.get(key)
+    value = state.get("last_consolidation_date")
+    payload = {
+        "last_consolidation_date": value if isinstance(value, str) and value.strip() else None,
+    }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
     return payload
 
@@ -76,63 +74,18 @@ def write_consolidation_state(project_root: Path, state: dict[str, Any]) -> dict
 def consolidation_status(project_root: Path) -> dict[str, Any]:
     state = read_consolidation_state(project_root)
     today = _local_today()
-    is_pending_today = state.get("pending_for_date") == today
-    is_in_progress_today = state.get("in_progress_for_date") == today
-    is_completed_today = state.get("completed_for_date") == today
+    is_completed_today = state.get("last_consolidation_date") == today
     return {
         **state,
         "today": today,
-        "is_pending_today": is_pending_today,
-        "is_in_progress_today": is_in_progress_today,
         "is_completed_today": is_completed_today,
-    }
-
-
-def schedule_daily_consolidation(project_root: Path) -> dict[str, Any]:
-    state = read_consolidation_state(project_root)
-    today = _local_today()
-    scheduled = False
-    if (
-        state.get("pending_for_date") != today
-        and state.get("in_progress_for_date") != today
-        and state.get("completed_for_date") != today
-    ):
-        state["pending_for_date"] = today
-        state["last_scheduled_at"] = _utc_now()
-        scheduled = True
-        write_consolidation_state(project_root, state)
-    return {
-        "scheduled": scheduled,
-        **consolidation_status(project_root),
-    }
-
-
-def mark_consolidation_started(project_root: Path) -> dict[str, Any]:
-    state = read_consolidation_state(project_root)
-    today = _local_today()
-    if state.get("completed_for_date") == today:
-        return {
-            "status": "already_completed",
-            **consolidation_status(project_root),
-        }
-    state["pending_for_date"] = today
-    state["in_progress_for_date"] = today
-    state["last_started_at"] = _utc_now()
-    write_consolidation_state(project_root, state)
-    return {
-        "status": "started",
-        **consolidation_status(project_root),
+        "is_due_today": not is_completed_today,
     }
 
 
 def mark_consolidation_completed(project_root: Path) -> dict[str, Any]:
-    state = read_consolidation_state(project_root)
     today = _local_today()
-    state["pending_for_date"] = None
-    state["in_progress_for_date"] = None
-    state["completed_for_date"] = today
-    state["last_completed_at"] = _utc_now()
-    write_consolidation_state(project_root, state)
+    write_consolidation_state(project_root, {"last_consolidation_date": today})
     return {
         "status": "completed",
         **consolidation_status(project_root),
@@ -141,22 +94,12 @@ def mark_consolidation_completed(project_root: Path) -> dict[str, Any]:
 
 def pending_consolidation_instruction(project_root: Path) -> str | None:
     status = consolidation_status(project_root)
-    if status["is_completed_today"]:
-        return None
-    if not status["is_pending_today"] and not status["is_in_progress_today"]:
+    if not status["is_due_today"]:
         return None
     return (
-        "Daily memory consolidation is due for this project.\n"
-        "- If your client exposes the Agent Memory consolidation skill, use it now. "
-        "In Claude plugin setups, that skill is `/agent-memory:consolidate`.\n"
-        "- If your client supports delegation, you may run the consolidation skill in a subagent.\n"
-        "- Start the workflow with `agent-memory consolidation-start`.\n"
-        "- Inspect `agent-memory consolidate --json`, which reports overlapping similarity clusters at cosine "
-        "similarity >= 0.92.\n"
-        "- For each cluster, decide whether to keep it as-is or replace it with fewer, more orthogonal memories.\n"
-        "- Apply the chosen `agent-memory delete`, `agent-memory edit`, and `agent-memory save` actions directly.\n"
-        "- Do not do contradiction resolution or timestamp-based truth arbitration in this pass.\n"
-        "- After the edits, run `agent-memory consolidation-complete`."
+        "Agent Memory daily consolidation is due.\n"
+        "- Run the daily consolidation skill, ideally in a sub-agent so it does not block the main thread. "
+        "If you cannot delegate it, run it in the current thread."
     )
 
 

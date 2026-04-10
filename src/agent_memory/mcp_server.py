@@ -10,7 +10,6 @@ from agent_memory.engine import AgentMemory, open_memory_with_retry
 from agent_memory.hooks.common import (
     consolidation_status,
     mark_consolidation_completed,
-    mark_consolidation_started,
 )
 
 
@@ -97,23 +96,15 @@ def build_server(default_project_root: Path | None = None) -> FastMCP:
 
     @server.tool()
     def consolidation_state(project_root: str | None = None) -> dict[str, object]:
-        """Return the daily memory consolidation scheduler state for the current project."""
+        """Return the current daily memory consolidation status for the current project."""
         root = _resolve_project_root(project_root) or project_hint
         if root is None:
             raise ConfigError("A project root is required to inspect consolidation state.")
         return consolidation_status(root)
 
     @server.tool()
-    def start_memory_consolidation(project_root: str | None = None) -> dict[str, object]:
-        """Mark today's memory consolidation workflow as started for the current project."""
-        root = _resolve_project_root(project_root) or project_hint
-        if root is None:
-            raise ConfigError("A project root is required to start memory consolidation.")
-        return mark_consolidation_started(root)
-
-    @server.tool()
     def complete_memory_consolidation(project_root: str | None = None) -> dict[str, object]:
-        """Mark today's memory consolidation workflow as completed for the current project."""
+        """Record today's date as the last completed memory consolidation for the current project."""
         root = _resolve_project_root(project_root) or project_hint
         if root is None:
             raise ConfigError("A project root is required to complete memory consolidation.")

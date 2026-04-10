@@ -457,27 +457,23 @@ def test_delete_command_requires_yes_for_nonzero_confirmation(tmp_path: Path) ->
         memory.close()
 
 
-def test_consolidation_status_start_and_complete_commands(tmp_path: Path) -> None:
+def test_consolidation_status_and_complete_command(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     runner = CliRunner()
 
     initial = runner.invoke(app, ["consolidation-status", "--cwd", str(tmp_path), "--json"])
     assert initial.exit_code == 0, initial.stdout
     initial_payload = json.loads(initial.stdout)
-    assert initial_payload["is_pending_today"] is False
-
-    started = runner.invoke(app, ["consolidation-start", "--cwd", str(tmp_path), "--json"])
-    assert started.exit_code == 0, started.stdout
-    started_payload = json.loads(started.stdout)
-    assert started_payload["status"] == "started"
-    assert started_payload["is_in_progress_today"] is True
+    assert initial_payload["last_consolidation_date"] is None
+    assert initial_payload["is_due_today"] is True
 
     completed = runner.invoke(app, ["consolidation-complete", "--cwd", str(tmp_path), "--json"])
     assert completed.exit_code == 0, completed.stdout
     completed_payload = json.loads(completed.stdout)
     assert completed_payload["status"] == "completed"
     assert completed_payload["is_completed_today"] is True
-    assert completed_payload["is_pending_today"] is False
+    assert completed_payload["is_due_today"] is False
+    assert completed_payload["last_consolidation_date"] == completed_payload["today"]
 
 
 def test_undo_command_reverts_save(tmp_path: Path) -> None:

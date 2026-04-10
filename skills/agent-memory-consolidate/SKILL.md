@@ -15,19 +15,13 @@ Use this skill for the daily Agent Memory consolidation pass.
 agent-memory consolidation-status --json
 ```
 
-2. Start the review:
-
-```bash
-agent-memory consolidation-start --json
-```
-
-3. Fetch the current cluster report:
+2. Fetch the current cluster report:
 
 ```bash
 agent-memory consolidate --json
 ```
 
-4. Review the clusters and decide what to do.
+3. Review the clusters and decide what to do.
 
 Rules:
 - The cluster report is read-only.
@@ -38,9 +32,9 @@ Rules:
 - If a cluster is redundant or messy, replace it with fewer, more orthogonal memories.
 - In `dry_run`, do not mutate the memory store.
 
-5. Decide whether to keep each cluster or replace it with fewer, more orthogonal memories.
+4. Decide whether to keep each cluster or replace it with fewer, more orthogonal memories.
 
-6. Apply the edits immediately using the existing memory-editing commands:
+5. Apply the edits immediately using the existing memory-editing commands:
 
 ```bash
 agent-memory show <memory_id> --json
@@ -49,7 +43,7 @@ agent-memory delete <memory_id> --yes
 agent-memory save "<new memory>"
 ```
 
-7. Mark the run complete:
+6. Mark the run complete:
 
 ```bash
 agent-memory consolidation-complete --json

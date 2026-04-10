@@ -7,7 +7,7 @@ What it does:
 - Adds an `agent-memory` executable to Claude's Bash tool PATH while the plugin is enabled
 - Bootstraps the real `agent-memory` binary into persistent plugin data on first use
 - Adds `/agent-memory:init`, `/agent-memory:doctor`, and `/agent-memory:consolidate` skills
-- Adds Claude `UserPromptSubmit` and `Stop` hooks so initialized repos get Agent Memory guidance, turn capture, and daily consolidation scheduling
+- Adds a Claude `UserPromptSubmit` hook so initialized repos get Agent Memory guidance and daily consolidation prompts
 
 Install from this repository's marketplace:
 

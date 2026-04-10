@@ -256,21 +256,15 @@ def test_install_codex_hooks_creates_hooks_json(tmp_path: Path) -> None:
     assert result.status == "created"
     payload = json.loads((tmp_path / ".codex" / "hooks.json").read_text(encoding='utf-8'))
     assert "UserPromptSubmit" in payload["hooks"]
-    assert "Stop" in payload["hooks"]
     user_prompt_hook = payload["hooks"]["UserPromptSubmit"][0]["hooks"][0]
-    stop_hook = payload["hooks"]["Stop"][0]["hooks"][0]
     # Portable form: dispatches via the on-PATH `agent-memory` binary, no
     # absolute python interpreter path. Also includes a PATH=$HOME/.local/bin
     # prefix so /bin/sh -c hook subprocesses can find the binary even though
     # /bin/sh has a stripped-down PATH that does not include ~/.local/bin.
     assert "agent-memory _hook codex-user-prompt-submit" in user_prompt_hook["command"]
-    assert "agent-memory _hook codex-stop-capture" in stop_hook["command"]
     assert "AGENT_MEMORY_PROJECT_ROOT=" in user_prompt_hook["command"]
-    assert "AGENT_MEMORY_PROJECT_ROOT=" in stop_hook["command"]
     assert "PATH=$HOME/.local/bin:$PATH" in user_prompt_hook["command"]
-    assert "PATH=$HOME/.local/bin:$PATH" in stop_hook["command"]
     assert "/python3" not in user_prompt_hook["command"]
-    assert "/python3" not in stop_hook["command"]
 
 
 def test_install_codex_hooks_preserves_existing_hooks(tmp_path: Path) -> None:
@@ -368,20 +362,14 @@ def test_install_claude_hooks_creates_settings(tmp_path: Path) -> None:
     # Default install is CLI-only — we must NOT touch enabledMcpjsonServers.
     assert "enabledMcpjsonServers" not in payload
     assert "UserPromptSubmit" in payload["hooks"]
-    assert "Stop" in payload["hooks"]
     user_prompt_hook = payload["hooks"]["UserPromptSubmit"][0]["hooks"][0]
-    stop_hook = payload["hooks"]["Stop"][0]["hooks"][0]
     # Portable form: dispatches via the on-PATH `agent-memory` binary, no
     # absolute python interpreter path. Also includes a PATH=$HOME/.local/bin
     # prefix so /bin/sh -c hook subprocesses can find the binary.
     assert "agent-memory _hook claude-user-prompt-submit" in user_prompt_hook["command"]
-    assert "agent-memory _hook claude-stop-capture" in stop_hook["command"]
     assert "AGENT_MEMORY_PROJECT_ROOT=" in user_prompt_hook["command"]
-    assert "AGENT_MEMORY_PROJECT_ROOT=" in stop_hook["command"]
     assert "PATH=$HOME/.local/bin:$PATH" in user_prompt_hook["command"]
-    assert "PATH=$HOME/.local/bin:$PATH" in stop_hook["command"]
     assert "/python3" not in user_prompt_hook["command"]
-    assert "/python3" not in stop_hook["command"]
 
 
 def test_install_claude_hooks_with_mcp_registers_server(tmp_path: Path) -> None:
