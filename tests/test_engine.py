@@ -149,7 +149,7 @@ def test_load_project_migrates_legacy_default_config(tmp_path: Path) -> None:
     assert project.config.stored_embedding_dimensions == 384
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 6
+    assert persisted["version"] == 7
     assert persisted["embedding_model"] == "snowflake/snowflake-arctic-embed-m"
     assert persisted["stored_embedding_model"] == "BAAI/bge-small-en-v1.5"
 
