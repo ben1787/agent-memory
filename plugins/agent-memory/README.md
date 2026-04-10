@@ -9,7 +9,7 @@ What it does:
 - Adds `/agent-memory:init`, `/agent-memory:doctor`, and `/agent-memory:consolidate` skills
 - Adds a Claude `UserPromptSubmit` hook so initialized repos get Agent Memory guidance and daily consolidation prompts
 
-Install from this repository's marketplace:
+This plugin is not in Claude Code's default marketplace. Add this repository as a custom marketplace, then install from it:
 
 ```text
 /plugin marketplace add ben1787/agent-memory
@@ -36,3 +36,8 @@ Notes:
 - Set `AGENT_MEMORY_VERSION` before launching Claude Code only for development or testing overrides.
 - Set `AGENT_MEMORY_LOCAL_TARBALL` to a built release archive only when you need to test an unreleased pinned version before publishing it.
 - If you want repo-local Claude hooks for teammates who are not using the plugin, run `agent-memory init` manually and omit `--no-install-claude-hooks`.
+
+Clean uninstall:
+
+- Run `agent-memory uninstall-all` from inside an initialized repo if you want both the repo store and the machine-level install artifacts removed.
+- If you only want to remove Agent Memory from the current repo, run `agent-memory uninstall --remove-store`.

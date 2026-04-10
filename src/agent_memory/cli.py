@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -60,6 +61,14 @@ from agent_memory.hooks.common import (
 
 
 from agent_memory import __display_version__, __version__
+
+
+CLAUDE_PLUGIN_MARKETPLACE = "agent-memory-plugins"
+CLAUDE_PLUGIN_NAME = "agent-memory"
+CLAUDE_PLUGIN_ENTRY = f"{CLAUDE_PLUGIN_NAME}@{CLAUDE_PLUGIN_MARKETPLACE}"
+CLAUDE_PLUGIN_DATA_DIRNAME = f"{CLAUDE_PLUGIN_NAME}-{CLAUDE_PLUGIN_MARKETPLACE}"
+CLAUDE_INSTALLER_PATH_HOOK_MARKER = "AGENT_MEMORY_INSTALLER_PATH_HOOK_v1"
+INSTALLER_RC_COMMENT = "# added by agent-memory installer"
 
 
 def _version_callback(value: bool) -> None:
@@ -260,6 +269,16 @@ def _resolve_project_path(path: Path | None) -> Path:
         return suggest_project_root(candidate)
 
 
+def _discover_existing_project_root(path: Path | None) -> Path | None:
+    candidate = (path or Path.cwd()).resolve()
+    if is_project_root(candidate):
+        return candidate
+    try:
+        return load_project(candidate).root
+    except ConfigError:
+        return None
+
+
 def _default_smoke_reinstall_from(cwd: Path | None = None) -> Path | None:
     candidate = (cwd or Path.cwd()).resolve()
     pyproject_path = candidate / "pyproject.toml"
@@ -291,6 +310,171 @@ def _remove_if_empty(path: Path) -> None:
         path.rmdir()
     except OSError:
         return
+
+
+def _path_payload(path: Path, status: str, details: str) -> dict[str, object]:
+    return {
+        "path": str(path),
+        "status": status,
+        "details": details,
+    }
+
+
+def _remove_path(path: Path, *, kind: str) -> dict[str, object]:
+    if not path.exists() and not path.is_symlink():
+        return _path_payload(path, "unchanged", f"{kind} does not exist.")
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+            return _path_payload(path, "removed", f"Deleted {kind}.")
+        path.unlink()
+        return _path_payload(path, "removed", f"Deleted {kind}.")
+    except OSError as exc:
+        return _path_payload(path, "error", f"Failed to delete {kind}: {exc}")
+
+
+def _prune_empty_parents(path: Path, *, stop_at: Path) -> None:
+    current = path
+    stop_at = stop_at.resolve()
+    while True:
+        try:
+            current = current.resolve()
+        except OSError:
+            break
+        if current == stop_at or not str(current).startswith(str(stop_at)):
+            break
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
+def _default_installer_path_line() -> str:
+    return f'export PATH="{Path.home() / ".local/bin"}:$PATH"'
+
+
+def _cleanup_shell_rc_file(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return _path_payload(path, "unchanged", "Shell rc file does not exist.")
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+    except OSError as exc:
+        return _path_payload(path, "error", f"Failed to read shell rc file: {exc}")
+
+    path_line = _default_installer_path_line()
+    updated: list[str] = []
+    removed = 0
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].rstrip("\r\n")
+        next_stripped = lines[index + 1].rstrip("\r\n") if index + 1 < len(lines) else None
+        if stripped == INSTALLER_RC_COMMENT and next_stripped == path_line:
+            removed += 2
+            index += 2
+            continue
+        if stripped == path_line:
+            removed += 1
+            index += 1
+            continue
+        updated.append(lines[index])
+        index += 1
+
+    if removed == 0:
+        return _path_payload(path, "unchanged", "No agent-memory PATH lines found.")
+
+    try:
+        path.write_text("".join(updated), encoding='utf-8')
+    except OSError as exc:
+        return _path_payload(path, "error", f"Failed to rewrite shell rc file: {exc}")
+    return _path_payload(path, "updated", f"Removed {removed} installer-managed PATH line(s).")
+
+
+def _cleanup_claude_settings_path_hook(settings_path: Path) -> dict[str, object]:
+    if not settings_path.exists():
+        return _path_payload(settings_path, "unchanged", "Claude settings file does not exist.")
+    try:
+        payload = json.loads(settings_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        return _path_payload(settings_path, "error", f"Failed to parse Claude settings: {exc}")
+
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return _path_payload(settings_path, "unchanged", "No Claude hooks block found.")
+    session_start = hooks.get("SessionStart")
+    if not isinstance(session_start, list):
+        return _path_payload(settings_path, "unchanged", "No SessionStart hooks found.")
+
+    changed = False
+    cleaned_groups: list[object] = []
+    removed_entries = 0
+    for group in session_start:
+        if not isinstance(group, dict):
+            cleaned_groups.append(group)
+            continue
+        entries = group.get("hooks")
+        if not isinstance(entries, list):
+            cleaned_groups.append(group)
+            continue
+        kept_entries: list[object] = []
+        for entry in entries:
+            if isinstance(entry, dict) and CLAUDE_INSTALLER_PATH_HOOK_MARKER in str(entry.get("command", "")):
+                removed_entries += 1
+                changed = True
+                continue
+            kept_entries.append(entry)
+        if kept_entries:
+            next_group = dict(group)
+            next_group["hooks"] = kept_entries
+            cleaned_groups.append(next_group)
+        else:
+            changed = True
+
+    if not changed:
+        return _path_payload(settings_path, "unchanged", "No agent-memory Claude SessionStart hook found.")
+
+    if cleaned_groups:
+        hooks["SessionStart"] = cleaned_groups
+    else:
+        hooks.pop("SessionStart", None)
+    if not hooks:
+        payload.pop("hooks", None)
+
+    try:
+        settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
+    except OSError as exc:
+        return _path_payload(settings_path, "error", f"Failed to rewrite Claude settings: {exc}")
+    return _path_payload(settings_path, "updated", f"Removed {removed_entries} agent-memory SessionStart hook(s).")
+
+
+def _cleanup_json_mapping_entry(path: Path, key: str, *, nested_field: str | None = None) -> dict[str, object]:
+    if not path.exists():
+        return _path_payload(path, "unchanged", "JSON file does not exist.")
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        return _path_payload(path, "error", f"Failed to parse JSON file: {exc}")
+
+    target: Any
+    if nested_field is None:
+        target = payload
+    else:
+        target = payload.get(nested_field)
+        if not isinstance(target, dict):
+            return _path_payload(path, "unchanged", f"No `{nested_field}` map found.")
+
+    if not isinstance(target, dict) or key not in target:
+        return _path_payload(path, "unchanged", f"No `{key}` entry found.")
+
+    target.pop(key, None)
+    try:
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding='utf-8')
+    except OSError as exc:
+        return _path_payload(path, "error", f"Failed to rewrite JSON file: {exc}")
+    return _path_payload(path, "updated", f"Removed `{key}` entry.")
 
 
 def _short_error_text(text: str, *, limit: int = 160) -> str:
@@ -477,14 +661,12 @@ def _run_init(
     )
 
 
-def _run_uninstall(
-    path: Path | None,
+def _project_uninstall_payload(
+    project_root: Path,
     *,
     remove_store: bool,
     remove_codex_trust: bool,
-    as_json: bool,
-) -> None:
-    project_root = _resolve_project_path(path)
+) -> dict[str, object]:
     local_exclude_entries = [entry for entry in [
         ".claude/settings.local.json",
         ".codex/config.toml",
@@ -554,14 +736,159 @@ def _run_uninstall(
         "store": store_result,
     }
 
+    return payload
+
+
+def _run_uninstall(
+    path: Path | None,
+    *,
+    remove_store: bool,
+    remove_codex_trust: bool,
+    as_json: bool,
+) -> None:
+    project_root = _resolve_project_path(path)
+    payload = _project_uninstall_payload(
+        project_root,
+        remove_store=remove_store,
+        remove_codex_trust=remove_codex_trust,
+    )
+
     if as_json:
         typer.echo(json.dumps(payload, indent=2))
         return
 
-    typer.echo(f"Project root: {project_root}")
-    for name, result in results:
-        typer.echo(f"{name}: {result.details}")
-    typer.echo(f"store: {store_result['details']}")
+    typer.echo(f"Project root: {payload['project_root']}")
+    for name, result in payload["results"].items():
+        if isinstance(result, dict):
+            typer.echo(f"{name}: {result.get('details')}")
+    store_result = payload["store"]
+    if isinstance(store_result, dict):
+        typer.echo(f"store: {store_result.get('details')}")
+
+
+def _system_uninstall_payload() -> dict[str, object]:
+    from agent_memory.upgrade import _cache_dir, _resolve_running_binary_path
+
+    home = Path.home()
+    candidate_binaries: list[Path] = []
+    executable_names = {"agent-memory", "agent-memory.exe"}
+
+    argv0 = Path(sys.argv[0]).expanduser()
+    if argv0.name in executable_names and argv0.is_absolute() and (argv0.exists() or argv0.is_symlink()):
+        candidate_binaries.append(argv0)
+    elif sys.argv and sys.argv[0]:
+        raw = Path(sys.argv[0])
+        if raw.name in executable_names and (raw.exists() or raw.is_symlink()):
+            candidate_binaries.append(raw.resolve())
+
+    on_path = shutil.which("agent-memory")
+    if on_path:
+        on_path_candidate = Path(on_path)
+        if on_path_candidate.name in executable_names:
+            candidate_binaries.append(on_path_candidate)
+
+    for default_binary in (
+        home / ".local" / "bin" / "agent-memory",
+        Path("/usr/local/bin/agent-memory"),
+        Path("/opt/homebrew/bin/agent-memory"),
+    ):
+        candidate_binaries.append(default_binary)
+
+    seen_binary_paths: set[Path] = set()
+    binary_results: list[dict[str, object]] = []
+    for candidate in candidate_binaries:
+        try:
+            key = candidate.resolve(strict=False)
+        except OSError:
+            key = candidate
+        if key in seen_binary_paths:
+            continue
+        seen_binary_paths.add(key)
+        if candidate.exists() or candidate.is_symlink():
+            result = _remove_path(candidate, kind="agent-memory executable")
+            binary_results.append(result)
+            if result.get("status") == "removed":
+                _prune_empty_parents(candidate.parent, stop_at=home)
+
+    running_binary = _resolve_running_binary_path()
+    default_libexec_root = home / ".local" / "share" / "agent-memory"
+    libexec_candidates: list[Path] = [default_libexec_root]
+    if running_binary is not None:
+        plugin_data_root = home / ".claude" / "plugins" / "data" / CLAUDE_PLUGIN_DATA_DIRNAME
+        if plugin_data_root not in running_binary.parents and len(running_binary.parents) >= 2:
+            libexec_candidates.append(running_binary.parent.parent)
+
+    libexec_results: list[dict[str, object]] = []
+    seen_libexec: set[Path] = set()
+    for candidate in libexec_candidates:
+        normalized = candidate.resolve(strict=False)
+        if normalized in seen_libexec:
+            continue
+        seen_libexec.add(normalized)
+        result = _remove_path(candidate, kind="agent-memory libexec bundle")
+        libexec_results.append(result)
+        if result.get("status") == "removed":
+            _prune_empty_parents(candidate.parent, stop_at=home)
+
+    shell_rc_results = [
+        _cleanup_shell_rc_file(path)
+        for path in (
+            Path(os.environ.get("ZDOTDIR") or str(home)) / ".zshrc",
+            Path(os.environ.get("ZDOTDIR") or str(home)) / ".zshenv",
+            home / ".bashrc",
+            home / ".bash_profile",
+            home / ".profile",
+        )
+    ]
+
+    claude_settings_path = home / ".claude" / "settings.json"
+    claude_registry_root = home / ".claude" / "plugins"
+    plugin_cache_root = claude_registry_root / "cache" / CLAUDE_PLUGIN_MARKETPLACE
+    plugin_data_root = claude_registry_root / "data" / CLAUDE_PLUGIN_DATA_DIRNAME
+    marketplace_clone_root = claude_registry_root / "marketplaces" / CLAUDE_PLUGIN_MARKETPLACE
+
+    claude_registry_results = {
+        "settings_path_hook": _cleanup_claude_settings_path_hook(claude_settings_path),
+        "settings_enabled_plugins": _cleanup_json_mapping_entry(
+            claude_settings_path,
+            CLAUDE_PLUGIN_ENTRY,
+            nested_field="enabledPlugins",
+        ),
+        "settings_extra_marketplaces": _cleanup_json_mapping_entry(
+            claude_settings_path,
+            CLAUDE_PLUGIN_MARKETPLACE,
+            nested_field="extraKnownMarketplaces",
+        ),
+        "known_marketplaces": _cleanup_json_mapping_entry(
+            claude_registry_root / "known_marketplaces.json",
+            CLAUDE_PLUGIN_MARKETPLACE,
+        ),
+        "installed_plugins": _cleanup_json_mapping_entry(
+            claude_registry_root / "installed_plugins.json",
+            CLAUDE_PLUGIN_ENTRY,
+            nested_field="plugins",
+        ),
+        "plugin_cache": _remove_path(plugin_cache_root, kind="Claude plugin cache"),
+        "plugin_data": _remove_path(plugin_data_root, kind="Claude plugin data"),
+        "marketplace_clone": _remove_path(marketplace_clone_root, kind="Claude marketplace clone"),
+    }
+
+    for result in claude_registry_results.values():
+        if isinstance(result, dict) and result.get("status") == "removed":
+            result_path = Path(str(result["path"]))
+            _prune_empty_parents(result_path.parent, stop_at=home)
+
+    update_cache_result = _remove_path(_cache_dir(), kind="agent-memory update cache")
+    if update_cache_result.get("status") == "removed":
+        _prune_empty_parents(Path(str(update_cache_result["path"])).parent, stop_at=home)
+
+    return {
+        "executables": binary_results,
+        "libexec_bundles": libexec_results,
+        "shell_rc_files": shell_rc_results,
+        "claude": claude_registry_results,
+        "update_cache": update_cache_result,
+    }
 
 
 @app.command(
@@ -700,6 +1027,80 @@ def uninstall(
         remove_codex_trust=remove_codex_trust,
         as_json=as_json,
     )
+
+
+@app.command(
+    name="uninstall-all",
+    help=(
+        "Clean-room uninstall. If run inside an initialized project (or with an explicit path), "
+        "this removes that project's Agent Memory integration and `.agent-memory/` store, then "
+        "also removes machine-level agent-memory artifacts: standalone binaries, extracted bundles, "
+        "installer PATH/session hooks, Claude plugin cache/data, Claude plugin registry entries, "
+        "and the update-check cache."
+    ),
+)
+def uninstall_all(
+    path: Path | None = typer.Argument(
+        None,
+        help="Optional project directory or any path inside an initialized project.",
+        resolve_path=True,
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    project_root = _discover_existing_project_root(path)
+    project_payload: dict[str, object] | None = None
+    if project_root is not None:
+        project_payload = _project_uninstall_payload(
+            project_root,
+            remove_store=True,
+            remove_codex_trust=True,
+        )
+
+    system_payload = _system_uninstall_payload()
+    payload = {
+        "project": project_payload,
+        "system": system_payload,
+        "notes": [
+            "If Claude Code is currently running, reload or restart it after uninstall so it drops any in-memory plugin state.",
+        ],
+    }
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    if project_payload is not None:
+        typer.echo(f"Project root: {project_payload['project_root']}")
+        project_results = project_payload.get("results")
+        if isinstance(project_results, dict):
+            for name, result in project_results.items():
+                if isinstance(result, dict):
+                    typer.echo(f"{name}: {result.get('details')}")
+        store_result = project_payload.get("store")
+        if isinstance(store_result, dict):
+            typer.echo(f"store: {store_result.get('details')}")
+    else:
+        typer.echo("Project root: none (no initialized Agent Memory project found from the provided path).")
+
+    typer.echo("System cleanup:")
+    for result in system_payload["executables"]:
+        if isinstance(result, dict):
+            typer.echo(f"  executable {result.get('path')}: {result.get('details')}")
+    for result in system_payload["libexec_bundles"]:
+        if isinstance(result, dict):
+            typer.echo(f"  libexec {result.get('path')}: {result.get('details')}")
+    for result in system_payload["shell_rc_files"]:
+        if isinstance(result, dict) and result.get("status") != "unchanged":
+            typer.echo(f"  shell rc {result.get('path')}: {result.get('details')}")
+    claude_payload = system_payload["claude"]
+    if isinstance(claude_payload, dict):
+        for name, result in claude_payload.items():
+            if isinstance(result, dict) and result.get("status") != "unchanged":
+                typer.echo(f"  claude {name}: {result.get('details')}")
+    cache_result = system_payload["update_cache"]
+    if isinstance(cache_result, dict):
+        typer.echo(f"  update cache: {cache_result.get('details')}")
+    typer.echo(payload["notes"][0])
 
 
 @app.command(

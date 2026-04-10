@@ -201,6 +201,161 @@ def test_uninstall_remove_store_deletes_project_memory_data(tmp_path: Path) -> N
     assert ".agent-memory/" not in exclude_text
 
 
+def test_uninstall_all_removes_project_and_machine_artifacts(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
+    monkeypatch.setattr("agent_memory.cli.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "agent_memory.upgrade._resolve_running_binary_path",
+        lambda: home / ".local" / "share" / "agent-memory" / "v0.2.8" / "agent-memory",
+    )
+
+    project_root = tmp_path / "repo"
+    (project_root / ".git").mkdir(parents=True)
+    init_result = runner.invoke(
+        app,
+        [
+            "init",
+            str(project_root),
+            "--embedding-backend",
+            "hash",
+            "--no-install-codex-trust",
+        ],
+    )
+    assert init_result.exit_code == 0
+
+    standalone_binary = home / ".local" / "bin" / "agent-memory"
+    standalone_binary.parent.mkdir(parents=True)
+    standalone_binary.write_text("binary\n", encoding="utf-8")
+    libexec_binary = home / ".local" / "share" / "agent-memory" / "v0.2.8" / "agent-memory"
+    libexec_binary.parent.mkdir(parents=True)
+    libexec_binary.write_text("bundle\n", encoding="utf-8")
+    cache_path = home / ".cache" / "agent-memory" / "update-check.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text("{}", encoding="utf-8")
+
+    zshrc = home / ".zshrc"
+    zshrc.write_text(
+        "# before\n"
+        "# added by agent-memory installer\n"
+        f'export PATH="{home / ".local/bin"}:$PATH"\n'
+        "# after\n",
+        encoding="utf-8",
+    )
+
+    claude_settings = home / ".claude" / "settings.json"
+    claude_settings.parent.mkdir(parents=True)
+    claude_settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "# AGENT_MEMORY_INSTALLER_PATH_HOOK_v1\nprintf 'export PATH=\"%s:$PATH\"\\n' \"/tmp/bin\" >> \"$CLAUDE_ENV_FILE\"",
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "echo keep-me",
+                                },
+                            ]
+                        }
+                    ]
+                },
+                "enabledPlugins": {
+                    "agent-memory@agent-memory-plugins": True,
+                    "other@market": True,
+                },
+                "extraKnownMarketplaces": {
+                    "agent-memory-plugins": {"source": {"source": "github", "repo": "ben1787/agent-memory"}},
+                    "other": {"source": {"source": "github", "repo": "foo/bar"}},
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    known_marketplaces = home / ".claude" / "plugins" / "known_marketplaces.json"
+    known_marketplaces.parent.mkdir(parents=True)
+    known_marketplaces.write_text(
+        json.dumps(
+            {
+                "agent-memory-plugins": {
+                    "source": {"source": "github", "repo": "ben1787/agent-memory"},
+                    "installLocation": str(home / ".claude" / "plugins" / "marketplaces" / "agent-memory-plugins"),
+                },
+                "other": {"source": {"source": "github", "repo": "foo/bar"}},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    installed_plugins = home / ".claude" / "plugins" / "installed_plugins.json"
+    installed_plugins.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "agent-memory@agent-memory-plugins": [{"scope": "user"}],
+                    "other@market": [{"scope": "user"}],
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin_cache = home / ".claude" / "plugins" / "cache" / "agent-memory-plugins"
+    plugin_cache.mkdir(parents=True)
+    (plugin_cache / "cached.txt").write_text("cache\n", encoding="utf-8")
+    plugin_data = home / ".claude" / "plugins" / "data" / "agent-memory-agent-memory-plugins"
+    plugin_data.mkdir(parents=True)
+    (plugin_data / "managed.txt").write_text("data\n", encoding="utf-8")
+    marketplace_clone = home / ".claude" / "plugins" / "marketplaces" / "agent-memory-plugins"
+    marketplace_clone.mkdir(parents=True)
+    (marketplace_clone / "marketplace.json").write_text("{}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["uninstall-all", str(project_root), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["project"]["project_root"] == str(project_root.resolve())
+    assert payload["project"]["store"]["status"] == "removed"
+    assert not (project_root / ".agent-memory").exists()
+    assert not standalone_binary.exists()
+    assert not (home / ".local" / "share" / "agent-memory").exists()
+    assert not cache_path.parent.exists()
+    assert not plugin_cache.exists()
+    assert not plugin_data.exists()
+    assert not marketplace_clone.exists()
+
+    settings_payload = json.loads(claude_settings.read_text(encoding="utf-8"))
+    session_start = settings_payload["hooks"]["SessionStart"][0]["hooks"]
+    assert len(session_start) == 1
+    assert session_start[0]["command"] == "echo keep-me"
+    assert "agent-memory@agent-memory-plugins" not in settings_payload["enabledPlugins"]
+    assert "agent-memory-plugins" not in settings_payload["extraKnownMarketplaces"]
+
+    known_marketplaces_payload = json.loads(known_marketplaces.read_text(encoding="utf-8"))
+    assert "agent-memory-plugins" not in known_marketplaces_payload
+    installed_plugins_payload = json.loads(installed_plugins.read_text(encoding="utf-8"))
+    assert "agent-memory@agent-memory-plugins" not in installed_plugins_payload["plugins"]
+
+    zshrc_text = zshrc.read_text(encoding="utf-8")
+    assert "# added by agent-memory installer" not in zshrc_text
+    assert f'export PATH="{home / ".local/bin"}:$PATH"' not in zshrc_text
+
+
 def test_save_command_persists_memory(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     runner = CliRunner()

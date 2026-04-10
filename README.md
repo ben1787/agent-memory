@@ -19,7 +19,8 @@ It is designed to give agents a **persistent project memory** that survives acro
 
 ### Claude Code plugin marketplace
 
-If you use Claude Code, the easiest install path is the plugin marketplace:
+If you use Claude Code, the easiest install path is the plugin marketplace.
+This plugin is not in Claude Code's default marketplace. Add this repository as a custom marketplace first:
 
 ```text
 /plugin marketplace add ben1787/agent-memory
@@ -120,6 +121,7 @@ Agent Memory enforces **at most one store along any ancestor chain**. If you try
 |---|---|
 | `agent-memory init [path]` | Set up a project store + install agent hooks + inject instructions block |
 | `agent-memory uninstall [path]` | Reverse `init` (use `--remove-store` to also delete `.agent-memory/`) |
+| `agent-memory uninstall-all [path]` | Clean-room uninstall for the current project plus machine-level binaries, bundles, Claude plugin data/cache, and installer PATH hooks |
 | `agent-memory save "<text>"` | Save one or more memories (positional or `--stdin`) |
 | `agent-memory recall <query>` | Retrieve clustered memories |
 | `agent-memory list [--recent N \| --all]` | List memories newest-first |
@@ -133,6 +135,22 @@ Agent Memory enforces **at most one store along any ancestor chain**. If you try
 | `agent-memory --version` | Print version |
 
 Run `agent-memory --help` for the full list.
+
+## Full uninstall
+
+For a project-only uninstall:
+
+```bash
+agent-memory uninstall --remove-store
+```
+
+For a clean-room uninstall that also removes machine-level binaries, extracted bundles, Claude plugin cache/data, Claude marketplace registry entries, and installer-managed PATH/session hooks:
+
+```bash
+agent-memory uninstall-all
+```
+
+Run `uninstall-all` from inside an initialized repo, or pass a repo path explicitly, if you also want that repo's `.agent-memory/` store removed as part of the same command.
 
 ## How agents discover it
 
