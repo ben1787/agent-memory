@@ -215,7 +215,7 @@ def test_uninstall_all_removes_project_and_machine_artifacts(monkeypatch, tmp_pa
     monkeypatch.setattr("agent_memory.cli.shutil.which", lambda name: None)
     monkeypatch.setattr(
         "agent_memory.upgrade._resolve_running_binary_path",
-        lambda: home / ".local" / "share" / "agent-memory" / "v0.2.8" / "agent-memory",
+        lambda: home / ".local" / "share" / "agent-memory" / "v0.2.9" / "agent-memory",
     )
 
     project_root = tmp_path / "repo"
@@ -235,7 +235,7 @@ def test_uninstall_all_removes_project_and_machine_artifacts(monkeypatch, tmp_pa
     standalone_binary = home / ".local" / "bin" / "agent-memory"
     standalone_binary.parent.mkdir(parents=True)
     standalone_binary.write_text("binary\n", encoding="utf-8")
-    libexec_binary = home / ".local" / "share" / "agent-memory" / "v0.2.8" / "agent-memory"
+    libexec_binary = home / ".local" / "share" / "agent-memory" / "v0.2.9" / "agent-memory"
     libexec_binary.parent.mkdir(parents=True)
     libexec_binary.write_text("bundle\n", encoding="utf-8")
     cache_path = home / ".cache" / "agent-memory" / "update-check.json"

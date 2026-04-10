@@ -7,36 +7,18 @@ import sys
 import traceback
 
 from agent_memory.hooks.common import (
+    auto_recall_matches,
     load_memory_config,
     log_hook_event,
     pending_consolidation_instruction,
     project_root_from_env_or_cwd,
     read_hook_input,
+    render_auto_recall_block,
+    render_guidance_context,
     sync_prompt_artifacts,
     summarize_hook_payload,
     truncate_words,
 )
-
-
-INSTRUCTION_FULL = """Agent Memory
-
-Storing memories:
-  Save only durable, repo-specific facts that will materially speed up future work or prevent likely mistakes.
-  Save only if at least 2:
-    - Likely to matter again
-    - Hard to rediscover quickly
-    - Changes tools/files/search path
-    - Missing it wastes time or causes bad assumptions
-    - Stable beyond this session
-  Prefer: workflow rules, architecture map, search shortcuts, environment quirks, external system behavior, validation/release constraints, recurring customer/project facts.
-  Do not save: temp branch/PR/test state, logs/transcripts, generic advice, grep-easy facts, speculation, soon-changing details.
-  Format: Scope + Category; 1-sentence fact; 1-sentence why; optional exception; confidence high/med/low.
-  Worthiness test: if it won’t save time, prevent a likely error, or narrow the search path, don’t save.
-  After work, save memories if the criteria are met with `agent-memory save "<memory>" "<memory>"`. Use `--stdin` for quotes/newlines.
-  If you saved something wrong: use `list --recent 5`, then `edit`/`delete`, or `undo`.
-
-Reading memories:
-  - If the answer isn’t clear from context or code, consider `agent-memory recall <task-shaped query>` before manual searching through files or the internet."""
 
 DEFAULT_CONTEXT_INTERVAL = 10
 
@@ -87,7 +69,8 @@ def main() -> None:
             interval = max(1, int(getattr(config, "prompt_context_turn_interval", DEFAULT_CONTEXT_INTERVAL)))
 
         turn_id = _parse_turn_id(payload.get("turn_id"))
-        if not _should_inject_context(turn_id, interval):
+        inject_guidance = _should_inject_context(turn_id, interval)
+        if not inject_guidance:
             log_hook_event(
                 project_root,
                 hook_name="claude_user_prompt_submit",
@@ -98,18 +81,31 @@ def main() -> None:
                     "reason": "non_interval_turn",
                 },
             )
+        sections: list[str] = []
+        recalled_memories, recall_metadata = auto_recall_matches(project_root, prompt)
+        if inject_guidance:
+            sections.append(
+                render_guidance_context(
+                    recalled_memories,
+                    consolidation_instruction=pending_consolidation_instruction(project_root),
+                )
+            )
+        elif recalled_memories:
+            sections.append(render_auto_recall_block(recalled_memories))
+
+        if not sections:
             _emit_noop()
             return
 
-        additional_context = INSTRUCTION_FULL
-        consolidation_instruction = pending_consolidation_instruction(project_root)
-        if consolidation_instruction:
-            additional_context = f"{additional_context}\n\n{consolidation_instruction}"
+        additional_context = "\n\n".join(sections)
         log_hook_event(
             project_root,
             hook_name="claude_user_prompt_submit",
             action="inject_context",
             payload={
+                "inject_guidance": inject_guidance,
+                "inject_auto_recall": recalled_memories is not None,
+                "auto_recall": recall_metadata,
                 "context_preview": truncate_words(additional_context, 80),
             },
         )

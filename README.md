@@ -11,7 +11,7 @@ It is designed to give agents a **persistent project memory** that survives acro
 - **Local-first**: data lives in `.agent-memory/memory.kuzu` inside your project
 - **Project-scoped**: each initialized folder gets its own memory store, with at most one store along any ancestor chain
 - **Graph-native**: memories are nodes; `SIMILAR` and `NEXT` edges are persisted in a [Kuzu](https://kuzudb.com/) database
-- **CLI-only by default**: agents access memory through `agent-memory recall` / `agent-memory save` via their shell tool, with no MCP wiring required
+- **CLI-first by default**: agents access memory through `agent-memory recall` / `agent-memory save` via their shell tool, with prompt hooks able to inject strong prompt-matched recall automatically and no MCP wiring required
 - **Recoverable**: every save / edit / delete is logged so `agent-memory undo` can walk back mistakes
 - **Single binary**: ships as a self-contained executable, no Python on the user's machine required
 
@@ -73,7 +73,7 @@ cd /path/to/your/repo
 agent-memory init
 ```
 
-That creates `.agent-memory/` for the store, installs `UserPromptSubmit` hooks for both Claude Code and Codex (if you use those agents) so they get reminded to use memory on every turn, and injects an `Agent Memory` instructions block into `CLAUDE.md` / `AGENTS.md` if those files exist.
+That creates `.agent-memory/` for the store, installs `UserPromptSubmit` hooks for both Claude Code and Codex (if you use those agents) so they can inject strong prompt-matched memory before the model call plus periodic memory guidance, and injects an `Agent Memory` instructions block into `CLAUDE.md` / `AGENTS.md` if those files exist.
 
 Save a memory:
 
@@ -165,13 +165,13 @@ The hook command is portable across machines:
 AGENT_MEMORY_PROJECT_ROOT=/abs/path/to/repo agent-memory _hook claude-user-prompt-submit
 ```
 
-It dispatches to the binary on `PATH`, so the same hook config works on any machine with `agent-memory` installed (regardless of install method). On every prompt, the hook injects a short reminder telling the model to recall memories before non-trivial work and save durable findings after.
+It dispatches to the binary on `PATH`, so the same hook config works on any machine with `agent-memory` installed (regardless of install method). On every prompt, the hook can recall against the raw user prompt and inject only strong matches; on the configured `1 + X` cadence, it also injects the broader memory/save guidance.
 
 For redundancy, `init` also injects an `Agent Memory` section into `CLAUDE.md` and `AGENTS.md` if those files already exist. The block tells the agent how to use the CLI even if the prompt-submit hook ever breaks or gets disabled.
 
 ## Optional: MCP server
 
-`agent-memory` ships with an MCP server (`agent-memory serve-mcp`) that exposes `save_memory`, `recall_memories`, `consolidate_memories`, etc. as MCP tools. The MCP path is **not installed by default** — it adds three points of wiring (`.mcp.json`, `.codex/config.toml`, `.claude/settings.local.json` `enabledMcpjsonServers`) and most users get just as much utility from the CLI + the prompt-submit hook reminder.
+`agent-memory` ships with an MCP server (`agent-memory serve-mcp`) that exposes `save_memory`, `recall_memories`, `consolidate_memories`, etc. as MCP tools. The MCP path is **not installed by default** — it adds three points of wiring (`.mcp.json`, `.codex/config.toml`, `.claude/settings.local.json` `enabledMcpjsonServers`) and most users get just as much utility from the CLI + the prompt-submit hook injection.
 
 To opt in:
 

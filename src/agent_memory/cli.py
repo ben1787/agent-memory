@@ -83,7 +83,7 @@ app = typer.Typer(
         "Project-scoped local memory for agents. "
         "Each initialized folder gets its own .agent-memory store. "
         "Use `agent-memory init` inside a repo to create the store, install "
-        "Codex/Claude local prompt hooks plus Codex project trust for automatic memory instructions, then `save`, `recall`, `list`, `edit`, `delete`, `undo`."
+        "Codex/Claude local prompt hooks plus Codex project trust for automatic prompt-time recall injection and memory instructions, then `save`, `recall`, `list`, `edit`, `delete`, `undo`."
     ),
 )
 
@@ -895,7 +895,7 @@ def _system_uninstall_payload() -> dict[str, object]:
     help=(
         "Initialize a project-local memory store and wire repo-local integration in one step. "
         "By default this creates .agent-memory/, hides local integration files from git, installs Codex and Claude "
-        "UserPromptSubmit hooks for automatic memory instructions, adds this repo to Codex trusted projects, and "
+        "UserPromptSubmit hooks for automatic prompt-time recall injection and memory instructions, adds this repo to Codex trusted projects, and "
         "injects an Agent Memory section into CLAUDE.md/AGENTS.md if those files exist. The default install is "
         "CLI-only — agents access memory through `agent-memory recall` / `agent-memory save` via their shell tool. "
         "Pass --with-mcp to additionally wire repo-local MCP server entries (.mcp.json, .codex/config.toml, "
@@ -931,7 +931,7 @@ def init(
     install_codex: bool = typer.Option(
         True,
         "--install-codex-hooks/--no-install-codex-hooks",
-        help="Install Codex repo-local prompt hooks and enable the codex_hooks feature flag for automatic memory instructions before prompts.",
+        help="Install Codex repo-local prompt hooks and enable the codex_hooks feature flag for automatic prompt-time recall injection and memory instructions.",
     ),
     install_codex_trust: bool = typer.Option(
         True,
@@ -941,7 +941,7 @@ def init(
     install_claude: bool = typer.Option(
         True,
         "--install-claude-hooks/--no-install-claude-hooks",
-        help="Install Claude local prompt hooks for automatic memory instructions before prompts.",
+        help="Install Claude local prompt hooks for automatic prompt-time recall injection and memory instructions.",
     ),
 ) -> None:
     _run_init(

@@ -144,7 +144,8 @@ This project uses Agent Memory for project-scoped long-term memory.
 Rules:
 - Treat this memory store as specific to the current project root.
 - If there is any ambiguity about which project root is active, ask the user instead of guessing.
-- If prior project knowledge might help and the answer is not already clear from the current context or code, consider calling `recall_memories` with a concrete query tied to the current task.
+- Strong matches from the current user prompt may be recalled automatically into context before the model call.
+- If prior project knowledge might help and the automatic recall is missing or incomplete, consider calling `recall_memories` with a concrete query tied to the current task.
 - During work, decide whether there are 0-3 durable memories worth saving with `save_memory`.
 - If the MCP tools are unavailable in the current client, fall back to `agent-memory recall` and `agent-memory save` in the current project root.
 - Prefer stable facts, decisions, file locations, constraints, preferences, and discovered relationships.
@@ -152,8 +153,8 @@ Rules:
 - Save memories into this project store only; never write into some parent or sibling project by accident.
 
 Suggested workflow:
-1. If prior project knowledge might help and the answer is not already obvious from the current context or code, consider recalling stored memories.
-2. If yes, call `agent-memory recall "<task-specific query>"`.
+1. Check any automatically injected Agent Memory context first.
+2. If prior project knowledge might help and the injected context is missing or incomplete, call `agent-memory recall "<task-specific query>"`.
 3. Do the work.
 4. If the work produced durable project knowledge, save 0-3 concise memories with `agent-memory save`.
 

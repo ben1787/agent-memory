@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 
-__version__ = "0.2.8"
+__version__ = "0.2.9"
 
 _PEP440_VERSION_RE = re.compile(
     r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"

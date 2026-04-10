@@ -30,13 +30,13 @@ INSTRUCTIONS_END_MARKER = "<!-- agent-memory:end -->"
 INSTRUCTIONS_BLOCK = """<!-- agent-memory:begin -->
 ## Agent Memory — persistent project knowledge
 
-This project has **Agent Memory** installed at `.agent-memory/` — a project-scoped vector store of durable project knowledge that survives across sessions, agents, and CLI invocations. It is the long-term memory you do not get from this file alone. A `UserPromptSubmit` hook also injects a short reminder of this on every turn; if that reminder is missing from your context, the hook is broken — surface that and stop.
+This project has **Agent Memory** installed at `.agent-memory/` — a project-scoped vector store of durable project knowledge that survives across sessions, agents, and CLI invocations. It is the long-term memory you do not get from this file alone. A `UserPromptSubmit` hook may also inject relevant recalled memory from the current user prompt before the model call; if that hook-driven context is missing when you expect it, surface that and stop.
 
 You access it through the `agent-memory` CLI, invoked via your shell tool (Bash or equivalent). There is no MCP server to wire up — just the CLI.
 
 ### Recall when useful
 
-If the answer is not already clear from the current context or code, ask yourself: *"Has prior work in this repo already discovered something that would change how I approach this?"* If yes, do a quick recall before broader research:
+The hook may inject strong prompt-matched memories automatically. If the answer is not already clear from the current context, code, or injected memory, ask yourself: *"Has prior work in this repo already discovered something that would change how I approach this?"* If yes, do a quick recall before broader research:
 
 ```
 agent-memory recall <task-shaped query>

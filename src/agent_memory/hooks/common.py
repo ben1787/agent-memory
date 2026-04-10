@@ -7,11 +7,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent_memory.engine import AgentMemory, open_memory_with_retry as open_memory_with_retry_engine, word_count
+from agent_memory.engine import AgentMemory, open_memory_with_retry as open_memory_with_retry_engine
 
 
 HOOK_LOG_FILENAME = "hook-events.jsonl"
 CONSOLIDATION_STATE_FILENAME = "consolidation-state.json"
+AUTO_RECALL_LIMIT = 3
+AUTO_RECALL_MIN_QUERY_SIMILARITY = 0.4
+AUTO_RECALL_MAX_WORDS_PER_MEMORY = 48
+AUTO_RECALL_FALLBACK = 'If you need more, call `agent-memory recall "<more specific query>"`.'
+STORING_SECTION = """Storing memories:
+  Save only durable, repo-specific facts that will materially speed up future work or prevent likely mistakes.
+  Save only if at least 2:
+    - Likely to matter again
+    - Hard to rediscover quickly
+    - Changes tools/files/search path
+    - Missing it wastes time or causes bad assumptions
+    - Stable beyond this session
+  Prefer: workflow rules, architecture map, search shortcuts, environment quirks, external system behavior, validation/release constraints, recurring customer/project facts.
+  Do not save: temp branch/PR/test state, logs/transcripts, generic advice, grep-easy facts, speculation, soon-changing details.
+  Format: Scope + Category; 1-sentence fact; 1-sentence why; optional exception; confidence high/med/low.
+  Worthiness test: if it won’t save time, prevent a likely error, or narrow the search path, don’t save.
+  After work, save memories if the criteria are met with `agent-memory save "<memory>" "<memory>"`. Use `--stdin` for quotes/newlines.
+  If you saved something wrong: use `list --recent 5`, then `edit`/`delete`, or `undo`."""
 
 _DEFAULT_CONSOLIDATION_STATE: dict[str, Any] = {
     "last_consolidation_date": None,
@@ -197,13 +215,99 @@ def truncate_words(text: str, limit: int) -> str:
     return f"{clipped} [truncated]"
 
 
-def open_memory_with_retry(project_root: Path, attempts: int = 5, delay_s: float = 0.15) -> AgentMemory:
+def open_memory_with_retry(
+    project_root: Path,
+    attempts: int = 5,
+    delay_s: float = 0.15,
+    *,
+    read_only: bool = False,
+) -> AgentMemory:
     return open_memory_with_retry_engine(
         project_root,
         exact=True,
+        read_only=read_only,
         attempts=attempts,
         delay_s=delay_s,
     )
+
+
+def auto_recall_matches(project_root: Path, query: str) -> tuple[list[str] | None, dict[str, Any]]:
+    cleaned_query = " ".join(query.split())
+    metadata: dict[str, Any] = {
+        "query": cleaned_query,
+        "limit": AUTO_RECALL_LIMIT,
+        "threshold": AUTO_RECALL_MIN_QUERY_SIMILARITY,
+    }
+    if not cleaned_query:
+        metadata["status"] = "empty_query"
+        return None, metadata
+
+    try:
+        memory = open_memory_with_retry(project_root, read_only=True)
+        try:
+            recall = memory.recall(cleaned_query, limit=AUTO_RECALL_LIMIT)
+        finally:
+            memory.close()
+    except Exception as exc:
+        metadata["status"] = "error"
+        metadata["error"] = str(exc)
+        return None, metadata
+
+    if not recall.hits:
+        metadata["status"] = "no_hits"
+        metadata["top_query_similarity"] = 0.0
+        return None, metadata
+
+    top_query_similarity = round(recall.hits[0].query_similarity, 4)
+    metadata["top_query_similarity"] = top_query_similarity
+    if top_query_similarity < AUTO_RECALL_MIN_QUERY_SIMILARITY:
+        metadata["status"] = "below_threshold"
+        return None, metadata
+
+    included_hits = [
+        hit
+        for hit in recall.hits
+        if hit.query_similarity >= AUTO_RECALL_MIN_QUERY_SIMILARITY
+    ]
+    if not included_hits:
+        metadata["status"] = "below_threshold"
+        return None, metadata
+
+    metadata["status"] = "matched"
+    metadata["matched_count"] = len(included_hits)
+    return [truncate_words(hit.text, AUTO_RECALL_MAX_WORDS_PER_MEMORY) for hit in included_hits], metadata
+
+
+def render_auto_recall_block(recalled_memories: list[str]) -> str:
+    lines = ["Here is some context from Agent Memory that might be related:"]
+    for text in recalled_memories:
+        lines.append(f"- {text}")
+    lines.append(AUTO_RECALL_FALLBACK)
+    return "\n".join(lines)
+
+
+def render_guidance_context(
+    recalled_memories: list[str] | None,
+    *,
+    consolidation_instruction: str | None,
+) -> str:
+    lines = [
+        "Agent Memory",
+        "",
+        "Reading memories:",
+    ]
+    if recalled_memories:
+        lines.append("  - Here is some context from Agent Memory that might be related:")
+        for text in recalled_memories:
+            lines.append(f"    - {text}")
+        lines.append(f"  - {AUTO_RECALL_FALLBACK}")
+    else:
+        lines.append("  - Related memory may be injected automatically from the current user prompt when there is a strong match.")
+        lines.append("  - If the injected context is missing or incomplete, call `agent-memory recall <task-shaped query>`.")
+    lines.extend(["", *STORING_SECTION.splitlines()])
+    if consolidation_instruction:
+        lines.extend(["", consolidation_instruction])
+    return "\n".join(lines)
 
 
 def latest_transcript_turn(transcript_path: Path) -> tuple[str | None, str | None, str | None]:
