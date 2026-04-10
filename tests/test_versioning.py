@@ -12,14 +12,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_package_version_converts_to_release_display_and_tag() -> None:
-    assert __version__ == "0.2.6"
-    assert __display_version__ == "0.2.6"
-    assert __release_tag__ == "v0.2.6"
+    assert __version__ == "0.2.7"
+    assert __display_version__ == "0.2.7"
+    assert __release_tag__ == "v0.2.7"
 
 
 def test_version_key_handles_package_and_release_forms() -> None:
     assert version_key(__version__) == version_key(__release_tag__)
-    assert version_key("0.2.7") > version_key(__version__)
+    assert version_key("0.2.8") > version_key(__version__)
 
 
 def test_pyproject_version_matches_package_version() -> None:
