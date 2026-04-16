@@ -35,11 +35,17 @@ from agent_memory.models import (
     ConsolidationReport,
     MemoryCluster,
     MemoryHit,
+    MemoryMetadata,
     MemoryRecord,
     SaveManyResult,
     MemoryStats,
     SaveResult,
 )
+from agent_memory.memory_metadata import (
+    compose_embedding_text,
+    merge_metadata,
+)
+from agent_memory.metadata_store import METADATA_FILENAME, MemoryMetadataStore
 from agent_memory.operations_log import (
     OP_DELETE,
     OP_EDIT,
@@ -50,9 +56,15 @@ from agent_memory.operations_log import (
 )
 from agent_memory.query_log import QUERY_LOG_FILENAME, log_query
 from agent_memory.store import GraphStore
+from agent_memory.write_lock import ProjectWriteLock
 
 
 SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+|\n+")
+STDIN_SAVE_HINT = (
+    " If this text came through a shell or agent command, prefer piping it to the CLI "
+    "`save`/`edit` stdin mode with a quoted heredoc so quotes, backticks, and newlines "
+    "cannot be rewritten before Agent Memory sees them."
+)
 
 
 def utc_now() -> str:
@@ -64,12 +76,43 @@ def _record_to_payload(memory: MemoryRecord) -> dict[str, object]:
     return {
         "id": memory.id,
         "text": memory.text,
+        "metadata": memory.metadata.to_dict(),
         "created_at": memory.created_at,
         "embedding": list(memory.embedding),
         "importance": memory.importance,
         "access_count": memory.access_count,
         "last_accessed": memory.last_accessed,
     }
+
+
+def _metadata_from_payload(
+    payload: dict[str, object],
+    *,
+    fallback: MemoryMetadata | None = None,
+) -> MemoryMetadata:
+    metadata_payload = payload.get("metadata")
+    if not isinstance(metadata_payload, dict):
+        return fallback or MemoryMetadata()
+    return merge_metadata(
+        MemoryMetadata(
+            title=str(metadata_payload["title"]).strip() or None
+            if isinstance(metadata_payload.get("title"), str)
+            else None,
+            kind=str(metadata_payload["kind"]).strip() or None
+            if isinstance(metadata_payload.get("kind"), str)
+            else None,
+            subsystem=str(metadata_payload["subsystem"]).strip() or None
+            if isinstance(metadata_payload.get("subsystem"), str)
+            else None,
+            workstream=str(metadata_payload["workstream"]).strip() or None
+            if isinstance(metadata_payload.get("workstream"), str)
+            else None,
+            environment=str(metadata_payload["environment"]).strip() or None
+            if isinstance(metadata_payload.get("environment"), str)
+            else None,
+        ),
+        fallback,
+    )
 
 
 def normalize_text(value: str) -> str:
@@ -167,6 +210,8 @@ class RecallResult:
                     "created_at": hit.created_at,
                     "memory_id": hit.memory_id,
                     "text": hit.text,
+                    "metadata": hit.metadata.to_dict(),
+                    "display_text": hit.display_text(),
                 }
             )
         return {
@@ -223,9 +268,22 @@ class AgentMemory:
         self.config = project.config
         self.read_only = read_only
         self._embedder = embedder
-        self.store = GraphStore(
-            project.db_path,
-            self.config.embedding_dimensions,
+        self._write_lock: ProjectWriteLock | None = None
+        if not read_only:
+            self._write_lock = ProjectWriteLock(project.root)
+            self._write_lock.acquire()
+        try:
+            self.store = GraphStore(
+                project.db_path,
+                self.config.embedding_dimensions,
+                read_only=read_only,
+            )
+        except Exception:
+            if self._write_lock is not None:
+                self._write_lock.release()
+            raise
+        self.metadata_store = MemoryMetadataStore(
+            project.db_path.parent / METADATA_FILENAME,
             read_only=read_only,
         )
         self.operations_log = OperationsLog(project.db_path.parent / OPERATIONS_LOG_FILENAME)
@@ -265,7 +323,11 @@ class AgentMemory:
         return cls(project, embedder=embedder)
 
     def close(self) -> None:
-        self.store.close()
+        try:
+            self.store.close()
+        finally:
+            if self._write_lock is not None:
+                self._write_lock.release()
 
     @property
     def embedder(self) -> Embedder:
@@ -276,6 +338,7 @@ class AgentMemory:
     def _save_one(
         self,
         text: str,
+        metadata: MemoryMetadata | None = None,
         embedding: list[float] | None = None,
         *,
         record_in_log: bool = True,
@@ -283,24 +346,29 @@ class AgentMemory:
         cleaned = text.strip()
         if not cleaned:
             raise ValueError("Memory text cannot be empty.")
-        words = word_count(cleaned)
+        resolved_metadata = merge_metadata(metadata, None)
+        normalized_text = compose_embedding_text(cleaned, resolved_metadata)
+        words = word_count(normalized_text)
         if words > self.config.max_memory_words:
             raise ValueError(
                 "Memory text is too long. "
                 f"Got {words} words, max allowed is {self.config.max_memory_words}. "
                 "Save a shorter summary instead."
+                + STDIN_SAVE_HINT
             )
 
         existing = list(self._memories)
-        resolved_embedding = embedding or embed_document(self.embedder, cleaned)
+        resolved_embedding = embedding or embed_document(self.embedder, normalized_text)
         timestamp = utc_now()
         memory = MemoryRecord(
             id=f"mem_{uuid.uuid4().hex[:12]}",
             text=cleaned,
             created_at=timestamp,
             embedding=resolved_embedding,
+            metadata=resolved_metadata,
         )
         self.store.add_memory(memory)
+        self.metadata_store.upsert(memory.id, resolved_metadata)
         self._memories.append(memory)
         self._memory_by_id[memory.id] = memory
         self._refresh_embedding_cache()
@@ -333,6 +401,7 @@ class AgentMemory:
                 for candidate, score in neighbors
             ],
             total_memories=len(self._memories),
+            metadata=memory.metadata,
         )
 
     def get(self, memory_id: str) -> MemoryRecord | None:
@@ -361,6 +430,7 @@ class AgentMemory:
         self,
         memory_id: str,
         new_text: str,
+        metadata: MemoryMetadata | None = None,
         *,
         record_in_log: bool = True,
     ) -> MemoryRecord:
@@ -372,27 +442,32 @@ class AgentMemory:
         cleaned = new_text.strip()
         if not cleaned:
             raise ValueError("Memory text cannot be empty.")
-        words = word_count(cleaned)
+        resolved_metadata = merge_metadata(metadata, existing.metadata)
+        normalized_text = compose_embedding_text(cleaned, resolved_metadata)
+        words = word_count(normalized_text)
         if words > self.config.max_memory_words:
             raise ValueError(
                 "Memory text is too long. "
                 f"Got {words} words, max allowed is {self.config.max_memory_words}."
+                + STDIN_SAVE_HINT
             )
 
         before_payload = _record_to_payload(existing)
-        new_embedding = embed_document(self.embedder, cleaned)
+        new_embedding = embed_document(self.embedder, normalized_text)
         timestamp = utc_now()
         updated = MemoryRecord(
             id=existing.id,
             text=cleaned,
             created_at=existing.created_at,
             embedding=new_embedding,
+            metadata=resolved_metadata,
             importance=existing.importance,
             access_count=existing.access_count,
             last_accessed=timestamp,
         )
 
         self.store.update_memory(updated)
+        self.metadata_store.upsert(existing.id, resolved_metadata)
         # Reason: `_reload_cache()` rebuilds `_strong_adjacency` from the
         # current embedding matrix, so dropping the node's row and
         # recomputing neighbors happens implicitly — no need to touch Kuzu
@@ -414,6 +489,7 @@ class AgentMemory:
             raise KeyError(f"Memory {memory_id!r} does not exist.")
         before_payload = _record_to_payload(existing)
         self.store.delete_memory(existing.id)
+        self.metadata_store.delete(existing.id)
         self._reload_cache()
         if record_in_log:
             self.operations_log.record_delete(existing.id, before=before_payload)
@@ -486,11 +562,13 @@ class AgentMemory:
             text=existing.text,
             created_at=str(payload["created_at"]),
             embedding=existing.embedding,
+            metadata=_metadata_from_payload(payload, fallback=existing.metadata),
             importance=float(payload.get("importance", existing.importance)),
             access_count=int(payload.get("access_count", existing.access_count)),
             last_accessed=payload.get("last_accessed"),  # type: ignore[arg-type]
         )
         self.store.update_memory(restored)
+        self.metadata_store.upsert(existing.id, restored.metadata)
         self._reload_cache()
 
     def _restore_from_payload(self, payload: dict[str, object], *, record_in_log: bool) -> None:
@@ -500,6 +578,7 @@ class AgentMemory:
             text=str(payload["text"]),
             created_at=str(payload["created_at"]),
             embedding=[float(value) for value in payload["embedding"]],  # type: ignore[arg-type]
+            metadata=_metadata_from_payload(payload),
             importance=float(payload.get("importance", 0.5)),
             access_count=int(payload.get("access_count", 0)),
             last_accessed=payload.get("last_accessed"),  # type: ignore[arg-type]
@@ -511,6 +590,7 @@ class AgentMemory:
                 f"Cannot restore memory {memory.id!r}: id is already in use."
             )
         self.store.add_memory(memory)
+        self.metadata_store.upsert(memory.id, memory.metadata)
         # Reason: `_reload_cache()` rebuilds `_strong_adjacency` from the
         # embedding matrix, which covers the restored node's neighbors for
         # free. SIMILAR edges are no longer persisted (see _save_one).
@@ -522,6 +602,7 @@ class AgentMemory:
     def save(
         self,
         text: str,
+        metadata: MemoryMetadata | None = None,
         embedding: list[float] | None = None,
     ) -> SaveManyResult: ...
 
@@ -529,19 +610,21 @@ class AgentMemory:
     def save(
         self,
         text: list[str],
+        metadata: None = None,
         embedding: None = None,
     ) -> SaveManyResult: ...
 
     def save(
         self,
         text: str | list[str],
+        metadata: MemoryMetadata | None = None,
         embedding: list[float] | None = None,
     ) -> SaveManyResult:
         if isinstance(text, str):
-            saved = [self._save_one(text, embedding=embedding)]
+            saved = [self._save_one(text, metadata=metadata, embedding=embedding)]
         else:
-            if embedding is not None:
-                raise ValueError("Batch save does not support a single shared embedding.")
+            if embedding is not None or metadata is not None:
+                raise ValueError("Batch save does not support shared metadata or embeddings.")
             saved = [self._save_one(item) for item in text]
         return SaveManyResult(saved=saved, total_memories=len(self._memories))
 
@@ -572,16 +655,20 @@ class AgentMemory:
             cleaned = str(record["text"]).strip()
             if not cleaned:
                 continue
+            metadata = _metadata_from_payload(record)
+            normalized_text = compose_embedding_text(cleaned, metadata)
             resolved_embedding = record.get("embedding")
             if not isinstance(resolved_embedding, list):
-                resolved_embedding = embed_document(self.embedder, cleaned)
+                resolved_embedding = embed_document(self.embedder, normalized_text)
             memory = MemoryRecord(
                 id=f"mem_{uuid.uuid4().hex[:12]}",
                 text=cleaned,
                 created_at=utc_now(),
                 embedding=resolved_embedding,
+                metadata=metadata,
             )
             self.store.add_memory(memory)
+            self.metadata_store.upsert(memory.id, metadata)
         self._reload_cache()
         return self.rewire()
 
@@ -625,6 +712,7 @@ class AgentMemory:
                     score=round(score, 4),
                     query_similarity=round(query_scores.get(memory_id, 0.0), 4),
                     created_at=self._memory_by_id[memory_id].created_at,
+                    metadata=self._memory_by_id[memory_id].metadata,
                 )
             )
             sources.append((memory_id, source_id, source_similarity))
@@ -689,6 +777,7 @@ class AgentMemory:
                 score=round(self._path_weight(query_scores.get(memory.id, 0.0)), 4),
                 query_similarity=round(query_scores.get(memory.id, 0.0), 4),
                 created_at=memory.created_at,
+                metadata=memory.metadata,
             )
             for memory in ranked_memories
         ]
@@ -791,6 +880,7 @@ class AgentMemory:
                         memory_id=member_id,
                         text=self._memory_by_id[member_id].text,
                         created_at=self._memory_by_id[member_id].created_at,
+                        metadata=self._memory_by_id[member_id].metadata,
                     )
                     for member_id in member_ids
                 ],
@@ -857,7 +947,23 @@ class AgentMemory:
         return self.stats()
 
     def _reload_cache(self) -> None:
-        self._memories = self.store.list_memories()
+        metadata_by_id = self.metadata_store.load_all()
+        hydrated: list[MemoryRecord] = []
+        for memory in self.store.list_memories():
+            metadata = merge_metadata(metadata_by_id.get(memory.id), None)
+            hydrated.append(
+                MemoryRecord(
+                    id=memory.id,
+                    text=memory.text,
+                    created_at=memory.created_at,
+                    embedding=memory.embedding,
+                    metadata=metadata,
+                    importance=memory.importance,
+                    access_count=memory.access_count,
+                    last_accessed=memory.last_accessed,
+                )
+            )
+        self._memories = hydrated
         self._memory_by_id = {memory.id: memory for memory in self._memories}
         self._refresh_embedding_cache()
         self._strong_adjacency = self._build_dense_adjacency()
@@ -1143,123 +1249,132 @@ def reembed_project(
     force: bool = False,
 ) -> ReembedResult:
     project = load_project(start, exact=exact)
-    config = project.config
-    previous_backend, previous_model, previous_dimensions = config.stored_embedding_signature()
-    current_backend, current_model, current_dimensions = config.desired_embedding_signature()
+    with ProjectWriteLock(project.root):
+        config = project.config
+        previous_backend, previous_model, previous_dimensions = config.stored_embedding_signature()
+        current_backend, current_model, current_dimensions = config.desired_embedding_signature()
 
-    if not force and not config.needs_reembed():
-        memory_count = 0
+        if not force and not config.needs_reembed():
+            memory_count = 0
+            if project.db_path.exists():
+                store = GraphStore(project.db_path, previous_dimensions, read_only=True)
+                try:
+                    memory_count = store.count_memories()
+                finally:
+                    store.close()
+            return ReembedResult(
+                project_root=project.root,
+                db_path=project.db_path,
+                reembedded=False,
+                memory_count=memory_count,
+                previous_store_backend=previous_backend,
+                previous_store_model=previous_model,
+                previous_store_dimensions=previous_dimensions,
+                current_store_backend=current_backend,
+                current_store_model=current_model,
+                current_store_dimensions=current_dimensions,
+            )
+
+        if embedder is None:
+            embedder = build_embedder(config)
+
+        memories: list[MemoryRecord] = []
+        next_edges = []
+        metadata_by_id: dict[str, MemoryMetadata] = {}
         if project.db_path.exists():
-            store = GraphStore(project.db_path, previous_dimensions, read_only=True)
+            source_store = GraphStore(
+                project.db_path,
+                previous_dimensions,
+                read_only=True,
+            )
             try:
-                memory_count = store.count_memories()
+                memories = source_store.list_memories()
+                next_edges = source_store.list_next_edges()
             finally:
-                store.close()
+                source_store.close()
+            metadata_store = MemoryMetadataStore(project.db_path.parent / METADATA_FILENAME, read_only=True)
+            metadata_by_id = metadata_store.load_all()
+
+        temp_db_path = project.db_path.with_name(
+            f"{project.db_path.name}.reembed-{uuid.uuid4().hex}.tmp"
+        )
+        temp_store = GraphStore(temp_db_path, current_dimensions)
+        try:
+            for memory in memories:
+                metadata = merge_metadata(metadata_by_id.get(memory.id), None)
+                temp_store.add_memory(
+                    MemoryRecord(
+                        id=memory.id,
+                        text=memory.text,
+                        created_at=memory.created_at,
+                        embedding=embed_document(
+                            embedder,
+                            compose_embedding_text(memory.text, metadata),
+                        ),
+                        metadata=metadata,
+                        importance=memory.importance,
+                        access_count=memory.access_count,
+                        last_accessed=memory.last_accessed,
+                    )
+                )
+            timestamp = utc_now()
+            if next_edges:
+                seen_edges: set[tuple[str, str]] = set()
+                for edge in next_edges:
+                    key = (edge.source_id, edge.target_id)
+                    if key in seen_edges:
+                        continue
+                    seen_edges.add(key)
+                    temp_store.create_next_edge(edge.source_id, edge.target_id, edge.weight, timestamp)
+            else:
+                for previous, current in zip(memories, memories[1:]):
+                    temp_store.create_next_edge(previous.id, current.id, 1.0, timestamp)
+        finally:
+            temp_store.close()
+
+        backup_path = project.db_path.with_name(
+            f"{project.db_path.name}.backup-{uuid.uuid4().hex}"
+        )
+        replaced_existing = False
+        try:
+            if project.db_path.exists():
+                project.db_path.replace(backup_path)
+                replaced_existing = True
+            temp_db_path.replace(project.db_path)
+        except Exception:
+            if temp_db_path.exists():
+                temp_db_path.unlink()
+            if replaced_existing and backup_path.exists():
+                backup_path.replace(project.db_path)
+            raise
+        else:
+            if backup_path.exists():
+                backup_path.unlink()
+
+        updated_config = config.with_store_current()
+        _write_project_config(project, updated_config)
+        cache_prune: FastembedCachePruneResult | None = None
+        if current_backend == "fastembed":
+            try:
+                cache_prune = prune_fastembed_model_cache([current_model])
+            except Exception:
+                # The store rewrite already succeeded. Cache pruning is best-effort
+                # cleanup and should not fail the migration path after the DB has
+                # been safely swapped.
+                cache_prune = None
         return ReembedResult(
             project_root=project.root,
             db_path=project.db_path,
-            reembedded=False,
-            memory_count=memory_count,
+            reembedded=True,
+            memory_count=len(memories),
             previous_store_backend=previous_backend,
             previous_store_model=previous_model,
             previous_store_dimensions=previous_dimensions,
             current_store_backend=current_backend,
             current_store_model=current_model,
             current_store_dimensions=current_dimensions,
+            cache_prune=cache_prune,
         )
-
-    if embedder is None:
-        embedder = build_embedder(config)
-
-    memories: list[MemoryRecord] = []
-    next_edges = []
-    if project.db_path.exists():
-        source_store = GraphStore(
-            project.db_path,
-            previous_dimensions,
-            read_only=True,
-        )
-        try:
-            memories = source_store.list_memories()
-            next_edges = source_store.list_next_edges()
-        finally:
-            source_store.close()
-
-    temp_db_path = project.db_path.with_name(
-        f"{project.db_path.name}.reembed-{uuid.uuid4().hex}.tmp"
-    )
-    temp_store = GraphStore(temp_db_path, current_dimensions)
-    try:
-        for memory in memories:
-            temp_store.add_memory(
-                MemoryRecord(
-                    id=memory.id,
-                    text=memory.text,
-                    created_at=memory.created_at,
-                    embedding=embed_document(embedder, memory.text),
-                    importance=memory.importance,
-                    access_count=memory.access_count,
-                    last_accessed=memory.last_accessed,
-                )
-            )
-        timestamp = utc_now()
-        if next_edges:
-            seen_edges: set[tuple[str, str]] = set()
-            for edge in next_edges:
-                key = (edge.source_id, edge.target_id)
-                if key in seen_edges:
-                    continue
-                seen_edges.add(key)
-                temp_store.create_next_edge(edge.source_id, edge.target_id, edge.weight, timestamp)
-        else:
-            for previous, current in zip(memories, memories[1:]):
-                temp_store.create_next_edge(previous.id, current.id, 1.0, timestamp)
-    finally:
-        temp_store.close()
-
-    backup_path = project.db_path.with_name(
-        f"{project.db_path.name}.backup-{uuid.uuid4().hex}"
-    )
-    replaced_existing = False
-    try:
-        if project.db_path.exists():
-            project.db_path.replace(backup_path)
-            replaced_existing = True
-        temp_db_path.replace(project.db_path)
-    except Exception:
-        if temp_db_path.exists():
-            temp_db_path.unlink()
-        if replaced_existing and backup_path.exists():
-            backup_path.replace(project.db_path)
-        raise
-    else:
-        if backup_path.exists():
-            backup_path.unlink()
-
-    updated_config = config.with_store_current()
-    _write_project_config(project, updated_config)
-    cache_prune: FastembedCachePruneResult | None = None
-    if current_backend == "fastembed":
-        try:
-            cache_prune = prune_fastembed_model_cache([current_model])
-        except Exception:
-            # The store rewrite already succeeded. Cache pruning is best-effort
-            # cleanup and should not fail the migration path after the DB has
-            # been safely swapped.
-            cache_prune = None
-    return ReembedResult(
-        project_root=project.root,
-        db_path=project.db_path,
-        reembedded=True,
-        memory_count=len(memories),
-        previous_store_backend=previous_backend,
-        previous_store_model=previous_model,
-        previous_store_dimensions=previous_dimensions,
-        current_store_backend=current_backend,
-        current_store_model=current_model,
-        current_store_dimensions=current_dimensions,
-        cache_prune=cache_prune,
-    )
 
 
 def open_memory_with_retry(

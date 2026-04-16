@@ -5,17 +5,84 @@ from pathlib import Path
 
 
 @dataclass(slots=True)
+class MemoryMetadata:
+    title: str | None = None
+    kind: str | None = None
+    subsystem: str | None = None
+    workstream: str | None = None
+    environment: str | None = None
+
+    def is_empty(self) -> bool:
+        return not any(
+            [
+                self.title,
+                self.kind,
+                self.subsystem,
+                self.workstream,
+                self.environment,
+            ]
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    def header_lines(self) -> list[str]:
+        lines: list[str] = []
+        if self.title:
+            lines.append(f"Title: {self.title}")
+        if self.kind:
+            lines.append(f"Kind: {self.kind}")
+        if self.subsystem:
+            lines.append(f"Subsystem: {self.subsystem}")
+        if self.workstream:
+            lines.append(f"Workstream: {self.workstream}")
+        if self.environment:
+            lines.append(f"Environment: {self.environment}")
+        return lines
+
+    def compact_parts(self) -> list[str]:
+        parts: list[str] = []
+        if self.title:
+            parts.append(self.title)
+        if self.kind:
+            parts.append(f"kind: {self.kind}")
+        if self.subsystem:
+            parts.append(f"subsystem: {self.subsystem}")
+        if self.workstream:
+            parts.append(f"workstream: {self.workstream}")
+        if self.environment:
+            parts.append(f"env: {self.environment}")
+        return parts
+
+
+@dataclass(slots=True)
 class MemoryRecord:
     id: str
     text: str
     created_at: str
     embedding: list[float]
+    metadata: MemoryMetadata = field(default_factory=MemoryMetadata)
     importance: float = 0.5
     access_count: int = 0
     last_accessed: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+    def display_text(self) -> str:
+        lines = self.metadata.header_lines()
+        if self.text:
+            if lines:
+                lines.append("")
+            lines.append(self.text)
+        return "\n".join(lines).strip()
+
+    def prompt_text(self) -> str:
+        parts = self.metadata.compact_parts()
+        cleaned = " ".join(self.text.split())
+        if cleaned:
+            parts.append(cleaned)
+        return " | ".join(part for part in parts if part)
 
 
 @dataclass(slots=True)
@@ -34,13 +101,29 @@ class MemoryHit:
     text: str
     score: float
     created_at: str
+    metadata: MemoryMetadata = field(default_factory=MemoryMetadata)
     query_similarity: float = 0.0
 
     def preview(self, limit: int = 140) -> str:
-        text = " ".join(self.text.split())
+        text = self.prompt_text()
         if len(text) <= limit:
             return text
         return f"{text[: limit - 1].rstrip()}…"
+
+    def display_text(self) -> str:
+        lines = self.metadata.header_lines()
+        if self.text:
+            if lines:
+                lines.append("")
+            lines.append(self.text)
+        return "\n".join(lines).strip()
+
+    def prompt_text(self) -> str:
+        parts = self.metadata.compact_parts()
+        cleaned = " ".join(self.text.split())
+        if cleaned:
+            parts.append(cleaned)
+        return " | ".join(part for part in parts if part)
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -72,6 +155,7 @@ class SaveResult:
     created_at: str
     connected_neighbors: list[dict[str, float]]
     total_memories: int
+    metadata: MemoryMetadata = field(default_factory=MemoryMetadata)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -94,9 +178,14 @@ class ConsolidationClusterMember:
     memory_id: str
     text: str
     created_at: str
+    metadata: MemoryMetadata = field(default_factory=MemoryMetadata)
 
     def preview(self, limit: int = 140) -> str:
-        text = " ".join(self.text.split())
+        parts = self.metadata.compact_parts()
+        cleaned = " ".join(self.text.split())
+        if cleaned:
+            parts.append(cleaned)
+        text = " | ".join(part for part in parts if part)
         if len(text) <= limit:
             return text
         return f"{text[: limit - 1].rstrip()}…"

@@ -12,6 +12,8 @@ from agent_memory.cli import _codex_feature_state, _doctor_payload, app
 from agent_memory.config import MemoryConfig, init_project
 from agent_memory.engine import open_memory_with_retry
 from agent_memory.integration import IntegrationResult
+from agent_memory.models import MemoryMetadata
+from agent_memory.retrieval_feedback import record_retrieval_event
 
 
 def test_codex_feature_state_parses_false(monkeypatch, tmp_path: Path) -> None:
@@ -215,7 +217,7 @@ def test_uninstall_all_removes_project_and_machine_artifacts(monkeypatch, tmp_pa
     monkeypatch.setattr("agent_memory.cli.shutil.which", lambda name: None)
     monkeypatch.setattr(
         "agent_memory.upgrade._resolve_running_binary_path",
-        lambda: home / ".local" / "share" / "agent-memory" / "v0.2.9" / "agent-memory",
+        lambda: home / ".local" / "share" / "agent-memory" / "v0.2.10" / "agent-memory",
     )
 
     project_root = tmp_path / "repo"
@@ -235,7 +237,7 @@ def test_uninstall_all_removes_project_and_machine_artifacts(monkeypatch, tmp_pa
     standalone_binary = home / ".local" / "bin" / "agent-memory"
     standalone_binary.parent.mkdir(parents=True)
     standalone_binary.write_text("binary\n", encoding="utf-8")
-    libexec_binary = home / ".local" / "share" / "agent-memory" / "v0.2.9" / "agent-memory"
+    libexec_binary = home / ".local" / "share" / "agent-memory" / "v0.2.10" / "agent-memory"
     libexec_binary.parent.mkdir(parents=True)
     libexec_binary.write_text("bundle\n", encoding="utf-8")
     cache_path = home / ".cache" / "agent-memory" / "update-check.json"
@@ -365,11 +367,31 @@ def test_save_command_persists_memory(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     runner = CliRunner()
 
-    result = runner.invoke(app, ["save", "--cwd", str(tmp_path), "--json", "CLI save works"])
+    result = runner.invoke(
+        app,
+        [
+            "save",
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "--title",
+            "CLI save works",
+            "--kind",
+            "operational",
+            "--subsystem",
+            "cli",
+            "--workstream",
+            "save_command",
+            "--environment",
+            "local",
+            "CLI save works",
+        ],
+    )
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["total_memories"] == 1
+    assert payload["saved"][0]["metadata"]["title"] == "CLI save works"
     memory = open_memory_with_retry(tmp_path, exact=True, read_only=True)
     try:
         recall = memory.recall("CLI save works", limit=5).to_dict()
@@ -385,7 +407,23 @@ def test_save_command_reads_stdin(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["save", "--cwd", str(tmp_path), "--json", "--stdin"],
+        [
+            "save",
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "--stdin",
+            "--title",
+            "CLI stdin save",
+            "--kind",
+            "operational",
+            "--subsystem",
+            "cli",
+            "--workstream",
+            "stdin_save",
+            "--environment",
+            "local",
+        ],
         input=body,
     )
 
@@ -406,7 +444,23 @@ def test_save_command_stdin_rejects_combined_args(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["save", "--cwd", str(tmp_path), "--stdin", "extra"],
+        [
+            "save",
+            "--cwd",
+            str(tmp_path),
+            "--stdin",
+            "--title",
+            "CLI stdin save",
+            "--kind",
+            "operational",
+            "--subsystem",
+            "cli",
+            "--workstream",
+            "stdin_save",
+            "--environment",
+            "local",
+            "extra",
+        ],
         input="body",
     )
 
@@ -418,9 +472,37 @@ def test_save_command_requires_text_or_stdin(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     runner = CliRunner()
 
-    result = runner.invoke(app, ["save", "--cwd", str(tmp_path)])
+    result = runner.invoke(
+        app,
+        [
+            "save",
+            "--cwd",
+            str(tmp_path),
+            "--title",
+            "Needs body",
+            "--kind",
+            "operational",
+            "--subsystem",
+            "cli",
+            "--workstream",
+            "save_command",
+            "--environment",
+            "local",
+        ],
+    )
 
     assert result.exit_code != 0
+
+
+def test_save_command_requires_metadata_flags(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["save", "--cwd", str(tmp_path), "body only"])
+
+    assert result.exit_code != 0
+    combined = result.stdout + (result.stderr or "")
+    assert "--title" in combined or "--kind" in combined
 
 
 def test_import_repo_command_bootstraps_project_corpus(tmp_path: Path) -> None:
@@ -504,6 +586,49 @@ def test_show_command_returns_full_memory(tmp_path: Path) -> None:
     assert payload["text"] == "a memory worth showing"
 
 
+def test_list_and_show_json_include_structured_metadata(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    runner = CliRunner()
+    saved = runner.invoke(
+        app,
+        [
+            "save",
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "--title",
+            "Prod pipeline execution mode",
+            "--kind",
+            "operational",
+            "--subsystem",
+            "CodePipeline",
+            "--workstream",
+            "execution_mode",
+            "--environment",
+            "prod",
+            "Prod bi-python CodePipeline uses SUPERSEDED executions.",
+        ],
+    )
+    assert saved.exit_code == 0, saved.stdout
+    mem_id = json.loads(saved.stdout)["saved"][0]["memory_id"]
+    listed = runner.invoke(app, ["list", "--cwd", str(tmp_path), "--recent", "1", "--json"])
+    shown = runner.invoke(app, ["show", mem_id, "--cwd", str(tmp_path), "--json"])
+
+    assert listed.exit_code == 0, listed.stdout
+    assert shown.exit_code == 0, shown.stdout
+    list_payload = json.loads(listed.stdout)
+    show_payload = json.loads(shown.stdout)
+
+    assert list_payload["memories"][0]["title"] == "Prod pipeline execution mode"
+    assert list_payload["memories"][0]["kind"] == "operational"
+    assert list_payload["memories"][0]["subsystem"] == "CodePipeline"
+    assert list_payload["memories"][0]["workstream"] == "execution_mode"
+    assert list_payload["memories"][0]["environment"] == "prod"
+    assert "Title: Prod pipeline execution mode" in list_payload["memories"][0]["display_text"]
+    assert show_payload["title"] == "Prod pipeline execution mode"
+    assert show_payload["text"] == "Prod bi-python CodePipeline uses SUPERSEDED executions."
+
+
 def test_show_command_missing_id_exits_nonzero(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     runner = CliRunner()
@@ -515,7 +640,16 @@ def test_edit_command_one_shot_updates_text(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     memory = open_memory_with_retry(tmp_path, exact=True)
     try:
-        result = memory.save("original text")
+        result = memory.save(
+            "original text",
+            metadata=MemoryMetadata(
+                title="Original title",
+                kind="operational",
+                subsystem="billing",
+                workstream="webhooks",
+                environment="prod",
+            ),
+        )
         mem_id = result.saved[0].memory_id
     finally:
         memory.close()
@@ -529,6 +663,48 @@ def test_edit_command_one_shot_updates_text(tmp_path: Path) -> None:
     assert edit.exit_code == 0, edit.stdout
     payload = json.loads(edit.stdout)
     assert payload["text"] == "corrected text"
+
+
+def test_edit_command_updates_metadata_without_text(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result = memory.save(
+            "original text",
+            metadata=MemoryMetadata(
+                title="Original title",
+                kind="operational",
+                subsystem="billing",
+                workstream="webhooks",
+                environment="prod",
+            ),
+        )
+        mem_id = result.saved[0].memory_id
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    edit = runner.invoke(
+        app,
+        [
+            "edit",
+            mem_id,
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "--title",
+            "Updated title",
+            "--workstream",
+            "event_debugging",
+        ],
+    )
+
+    assert edit.exit_code == 0, edit.stdout
+    payload = json.loads(edit.stdout)
+    assert payload["text"] == "original text"
+    assert payload["title"] == "Updated title"
+    assert payload["workstream"] == "event_debugging"
+    assert payload["subsystem"] == "billing"
 
 
 def test_edit_command_stdin_handles_special_chars(tmp_path: Path) -> None:
@@ -802,3 +978,302 @@ def test_recall_command_accepts_unquoted_multi_word_query(tmp_path: Path) -> Non
     assert payload["query"] == "billing webhook handler"
     assert payload["nodes"][0]["source"] == "QUERY"
     assert payload["nodes"][0]["text"] == "The billing webhook handler lives in services/billing/webhooks.py."
+
+
+def test_save_command_reads_piped_stdin_without_flag(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "save",
+            "--cwd",
+            str(tmp_path),
+            "--title",
+            "Billing webhook handler",
+            "--kind",
+            "operational",
+            "--subsystem",
+            "billing",
+            "--workstream",
+            "webhooks",
+            "--environment",
+            "prod",
+        ],
+        input="Billing webhook handler lives in services/billing/webhooks.py.\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        records = memory.list_all()
+        assert len(records) == 1
+        assert records[0].text == "Billing webhook handler lives in services/billing/webhooks.py."
+    finally:
+        memory.close()
+
+
+def test_edit_command_reads_piped_stdin_without_flag(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        saved = memory.save("Old billing memory").saved[0]
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["edit", saved.memory_id, "--cwd", str(tmp_path)],
+        input="Updated billing webhook handler path.\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    reopened = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        updated = reopened.get(saved.memory_id)
+        assert updated is not None
+        assert updated.text == "Updated billing webhook handler path."
+    finally:
+        reopened.close()
+
+
+def test_feedback_command_reads_stdin_json(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    event_id = record_retrieval_event(
+        tmp_path,
+        query="billing webhook handler",
+        matches=[
+            {
+                "alias": "A",
+                "memory_id": "mem_alpha",
+                "text": "Billing webhook handler lives in services/billing/webhooks.py.",
+                "query_similarity": 0.77,
+                "score": 0.77,
+                "feedback_bias": 0.0,
+                "adjusted_score": 0.77,
+            }
+        ],
+        hook_payload={},
+    )
+    assert event_id is not None
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["feedback", event_id, "--cwd", str(tmp_path), "--json", "--stdin"],
+        input=json.dumps(
+            {
+                "overall": "helpful",
+                "why": 'Useful because it included "quotes", `backticks`, and a $literal safely.',
+                "better": "A more specific routing note would help.",
+                "missing": "Ownership checks in the webhook path.",
+                "memory": [{"alias": "A", "label": "helpful"}],
+            }
+        ),
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["event_id"] == event_id
+    assert payload["overall"] == "helpful"
+    assert payload["why"] == 'Useful because it included "quotes", `backticks`, and a $literal safely.'
+    assert payload["better"] == "A more specific routing note would help."
+    assert payload["missing"] == "Ownership checks in the webhook path."
+    assert payload["memory_feedback"][0]["alias"] == "A"
+    assert payload["memory_feedback"][0]["memory_id"] == "mem_alpha"
+    assert payload["memory_feedback"][0]["label"] == "helpful"
+
+
+def test_backfill_metadata_command_populates_legacy_store(monkeypatch, tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        memory.save("Project decision: CodePipeline deploy flow uses SUPERSEDED executions in prod.")
+    finally:
+        memory.close()
+
+    def fake_review(records, *, model: str = "gpt-5.4-mini"):
+        assert model == "gpt-5.4-mini"
+        assert len(records) == 1
+        return [
+            (
+                records[0].id,
+                MemoryMetadata(
+                    title="CodePipeline deploy flow uses SUPERSEDED executions in prod",
+                    kind="architecture",
+                    subsystem="CodePipeline",
+                    workstream="prod_pipeline",
+                    environment="prod",
+                ),
+            )
+        ]
+
+    monkeypatch.setattr("agent_memory.cli.review_memories_with_codex", fake_review)
+    monkeypatch.setattr("agent_memory.metadata_backfill.review_memories_with_codex", fake_review)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["backfill-metadata", "--cwd", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["updated_memories"] == 1
+    assert payload["reembedded"] is True
+
+    reopened = open_memory_with_retry(tmp_path, exact=True, read_only=True)
+    try:
+        record = reopened.list_all()[0]
+        assert record.metadata.title == "CodePipeline deploy flow uses SUPERSEDED executions in prod"
+        assert record.metadata.kind == "architecture"
+        assert record.metadata.subsystem == "CodePipeline"
+        assert record.metadata.environment == "prod"
+    finally:
+        reopened.close()
+
+
+def test_feedback_command_reads_piped_stdin_without_flag(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    event_id = record_retrieval_event(
+        tmp_path,
+        query="billing retry behavior",
+        matches=[
+            {
+                "alias": "A",
+                "memory_id": "mem_beta",
+                "text": "Billing retry behavior lives in services/billing/retries.py.",
+                "query_similarity": 0.71,
+                "score": 0.71,
+                "feedback_bias": 0.0,
+                "adjusted_score": 0.71,
+            }
+        ],
+        hook_payload={},
+    )
+    assert event_id is not None
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["feedback", event_id, "--cwd", str(tmp_path), "--json"],
+        input=json.dumps(
+            {
+                "overall": "mixed",
+                "note": "Auto-read stdin works when no inline flags are provided.",
+                "memory": ["A=partial"],
+            }
+        ),
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["overall"] == "mixed"
+    assert payload["note"] == "Auto-read stdin works when no inline flags are provided."
+    assert payload["memory_feedback"][0]["label"] == "partial"
+
+
+def test_feedback_command_stdin_rejects_combined_inline_flags(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    event_id = record_retrieval_event(
+        tmp_path,
+        query="billing webhook",
+        matches=[
+            {
+                "alias": "A",
+                "memory_id": "mem_gamma",
+                "text": "Billing webhook handler lives in services/billing/webhooks.py.",
+                "query_similarity": 0.75,
+                "score": 0.75,
+                "feedback_bias": 0.0,
+                "adjusted_score": 0.75,
+            }
+        ],
+        hook_payload={},
+    )
+    assert event_id is not None
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["feedback", event_id, "--cwd", str(tmp_path), "--stdin", "--overall", "helpful"],
+        input=json.dumps({"memory": ["A=helpful"]}),
+    )
+
+    assert result.exit_code != 0
+    combined_output = (result.stdout or "") + (result.stderr or "")
+    assert "--stdin cannot be combined" in combined_output
+
+
+def test_init_with_link_root_wires_child_repo_to_parent_store(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data-home"))
+
+    project_root = tmp_path / "parent"
+    child_root = project_root / "child"
+    child_root.mkdir(parents=True)
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            str(project_root),
+            "--link-root",
+            str(child_root),
+            "--embedding-backend",
+            "hash",
+            "--no-install-codex-trust",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    linked_roots_payload = json.loads((project_root / ".agent-memory" / "linked-roots.json").read_text(encoding="utf-8"))
+    assert linked_roots_payload["linked_project_roots"] == [str(child_root.resolve())]
+
+    codex_payload = json.loads((child_root / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    codex_command = codex_payload["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert str(project_root.resolve()) in codex_command
+    assert str(child_root.resolve()) not in codex_command
+
+    claude_payload = json.loads((child_root / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    claude_command = claude_payload["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert str(project_root.resolve()) in claude_command
+    assert str(child_root.resolve()) not in claude_command
+
+
+def test_migrate_memory_md_imports_durable_notes_only(tmp_path: Path) -> None:
+    runner = CliRunner()
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    (tmp_path / "MEMORY.md").write_text(
+        "# Project Memory\n\n"
+        "Rules:\n"
+        "- Ignore this rules bullet.\n\n"
+        "## Durable Notes\n"
+        "- Billing webhook handler lives in services/billing/webhooks.py.\n\n"
+        "## Point-In-Time Notes\n"
+        "- 2026-04-12, Stripe test mode: price_123 is the sandbox monthly subscription.\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["migrate-memory-md", "--cwd", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["discovered_entries"] == 2
+    assert payload["saved_count"] == 2
+
+    reopened = open_memory_with_retry(tmp_path, exact=True, read_only=True)
+    try:
+        records = reopened.list_all()
+        assert len(records) == 2
+        titles = {record.metadata.title for record in records}
+        assert any(title and title.startswith("Billing webhook handler") for title in titles)
+        assert any(record.metadata.kind == "historical" for record in records)
+        assert all("Ignore this rules bullet" not in record.text for record in records)
+    finally:
+        reopened.close()

@@ -8,28 +8,41 @@ from pathlib import Path
 from typing import Any
 
 from agent_memory.engine import AgentMemory, open_memory_with_retry as open_memory_with_retry_engine
+from agent_memory.metadata_store import METADATA_FILENAME, MemoryMetadataStore
+from agent_memory.retrieval_feedback import feedback_bias_by_memory
 
 
 HOOK_LOG_FILENAME = "hook-events.jsonl"
 CONSOLIDATION_STATE_FILENAME = "consolidation-state.json"
 AUTO_RECALL_LIMIT = 3
-AUTO_RECALL_MIN_QUERY_SIMILARITY = 0.4
+AUTO_RECALL_MIN_QUERY_SIMILARITY = 0.7
 AUTO_RECALL_MAX_WORDS_PER_MEMORY = 48
 AUTO_RECALL_FALLBACK = 'If you need more, call `agent-memory recall "<more specific query>"`.'
 STORING_SECTION = """Storing memories:
   Save only durable, repo-specific facts that will materially speed up future work or prevent likely mistakes.
-  Save only if at least 2:
-    - Likely to matter again
-    - Hard to rediscover quickly
-    - Changes tools/files/search path
-    - Missing it wastes time or causes bad assumptions
-    - Stable beyond this session
-  Prefer: workflow rules, architecture map, search shortcuts, environment quirks, external system behavior, validation/release constraints, recurring customer/project facts.
+  After you finish the work for this turn, default to saving 1-3 memories when you resolved a non-obvious operational fact or explicit user correction.
+  One strong operational fact is enough; you do not need 2 separate reasons.
+  Prefer: workflow rules, architecture map, search shortcuts, file/module locations that were hard to find, hook/threshold behavior, install/update gotchas, runtime quirks, external system behavior, validation/release constraints, recurring customer/project facts.
   Do not save: temp branch/PR/test state, logs/transcripts, generic advice, grep-easy facts, speculation, soon-changing details.
-  Format: Scope + Category; 1-sentence fact; 1-sentence why; optional exception; confidence high/med/low.
-  Worthiness test: if it won’t save time, prevent a likely error, or narrow the search path, don’t save.
-  After work, save memories if the criteria are met with `agent-memory save "<memory>" "<memory>"`. Use `--stdin` for quotes/newlines.
+  Save with explicit metadata fields: `--title`, `--kind`, `--subsystem`, `--workstream`, `--environment`.
+  Keep the body itself to 1-3 concise sentences; do not repeat the metadata inside the body text.
+  Reuse existing metadata spellings when they already fit; otherwise create a new value.
+  Orthogonality rules:
+  - `subsystem` = stable reusable component, service, package, domain area, or repo area.
+  - Do not use file paths, endpoint paths, one-off bug names, or title paraphrases as `subsystem` unless that artifact is itself the stable boundary used by the repo.
+  - `workstream` = reusable capability, problem area, workflow, or topic within the subsystem.
+  - Do not restate the title, file path, or one-off incident summary as `workstream`.
+  - If a memory mentions both a stable component and a file path, put the stable component in `subsystem` and leave the file path in the body text.
+  Worthiness test: save it if it would save future code inspection, prevent a likely wrong assumption, or narrow the search path.
+  Before the final answer, if you resolved a concrete how/why/where question from code inspection or debugging, save it with `agent-memory save --title "<title>" --kind "<kind>" --subsystem "<subsystem>" --workstream "<workstream>" --environment "<environment>" --stdin`. Use `--stdin` for quotes/newlines.
   If you saved something wrong: use `list --recent 5`, then `edit`/`delete`, or `undo`."""
+SAVE_NUDGE_LINES = (
+    "Memory save reminder:",
+    "  - After you finish the work for this turn, save 1-3 durable repo-specific facts if you resolved a non-obvious operational detail or explicit user correction.",
+    "  - One strong operational fact is enough: file/module locations, hook or threshold behavior, install/update gotchas, runtime quirks, or why something behaved that way.",
+    "  - Save near the end with explicit metadata fields: `agent-memory save --title ... --kind ... --subsystem ... --workstream ... --environment ... --stdin`.",
+    "  - Keep the body text plain. Do not encode metadata in the body itself. Use `--stdin` for quotes/newlines.",
+)
 
 _DEFAULT_CONSOLIDATION_STATE: dict[str, Any] = {
     "last_consolidation_date": None,
@@ -231,7 +244,21 @@ def open_memory_with_retry(
     )
 
 
-def auto_recall_matches(project_root: Path, query: str) -> tuple[list[str] | None, dict[str, Any]]:
+def _alias_for_index(index: int) -> str:
+    label = ""
+    value = index
+    while True:
+        value, remainder = divmod(value, 26)
+        label = chr(ord("A") + remainder) + label
+        if value == 0:
+            return label
+        value -= 1
+
+
+def auto_recall_matches(
+    project_root: Path,
+    query: str,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any]]:
     cleaned_query = " ".join(query.split())
     metadata: dict[str, Any] = {
         "query": cleaned_query,
@@ -256,18 +283,30 @@ def auto_recall_matches(project_root: Path, query: str) -> tuple[list[str] | Non
     if not recall.hits:
         metadata["status"] = "no_hits"
         metadata["top_query_similarity"] = 0.0
+        metadata["top_parent_score"] = 0.0
         return None, metadata
 
-    top_query_similarity = round(recall.hits[0].query_similarity, 4)
+    top_query_similarity = round(getattr(recall, "seed_score", 0.0), 4)
+    top_parent_score = round(recall.hits[0].score, 4)
     metadata["top_query_similarity"] = top_query_similarity
-    if top_query_similarity < AUTO_RECALL_MIN_QUERY_SIMILARITY:
+    metadata["top_parent_score"] = top_parent_score
+    metadata["threshold_basis"] = "parent_score"
+    if top_parent_score < AUTO_RECALL_MIN_QUERY_SIMILARITY:
         metadata["status"] = "below_threshold"
         return None, metadata
 
+    biases = feedback_bias_by_memory(project_root)
+    ranked_hits = []
+    for hit in recall.hits:
+        bias = biases.get(hit.memory_id, 0.0)
+        adjusted_score = round(hit.score + bias, 4)
+        ranked_hits.append((adjusted_score, hit.score, hit.query_similarity, hit, bias))
+    ranked_hits.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+
     included_hits = [
-        hit
-        for hit in recall.hits
-        if hit.query_similarity >= AUTO_RECALL_MIN_QUERY_SIMILARITY
+        (adjusted_score, hit, bias)
+        for adjusted_score, _, _, hit, bias in ranked_hits
+        if hit.score >= AUTO_RECALL_MIN_QUERY_SIMILARITY
     ]
     if not included_hits:
         metadata["status"] = "below_threshold"
@@ -275,21 +314,124 @@ def auto_recall_matches(project_root: Path, query: str) -> tuple[list[str] | Non
 
     metadata["status"] = "matched"
     metadata["matched_count"] = len(included_hits)
-    return [truncate_words(hit.text, AUTO_RECALL_MAX_WORDS_PER_MEMORY) for hit in included_hits], metadata
+    metadata["feedback_bias_applied"] = any(abs(bias) > 0 for _, _, bias in included_hits)
+    matches: list[dict[str, Any]] = []
+    for index, (adjusted_score, hit, bias) in enumerate(included_hits):
+        matches.append(
+            {
+                "alias": _alias_for_index(index),
+                "memory_id": hit.memory_id,
+                "text": truncate_words(" ".join(hit.text.split()), AUTO_RECALL_MAX_WORDS_PER_MEMORY),
+                "title": hit.metadata.title,
+                "kind": hit.metadata.kind,
+                "subsystem": hit.metadata.subsystem,
+                "workstream": hit.metadata.workstream,
+                "environment": hit.metadata.environment,
+                "query_similarity": round(hit.query_similarity, 4),
+                "score": round(hit.score, 4),
+                "feedback_bias": round(bias, 4),
+                "adjusted_score": round(adjusted_score, 4),
+            }
+        )
+    return matches, metadata
 
 
-def render_auto_recall_block(recalled_memories: list[str]) -> str:
+def render_feedback_instruction(feedback_event_id: str | None) -> list[str]:
+    if not feedback_event_id:
+        return []
+    return [
+        "If you actually used or evaluated these injected memories during the turn, record structured retrieval feedback near the end of the task:",
+        (
+            f'`agent-memory feedback {feedback_event_id} --overall helpful|mixed|irrelevant '
+            '--why "<why the recalled set was or was not useful>" '
+            '--better "<what would have made the recalled set better>" '
+            '--memory A=helpful --memory B=partial --memory C=irrelevant '
+            '[--missing "<what should have surfaced>"]`'
+        ),
+        "Include a short event-level assessment of the whole recalled set: whether it was useful, why or why not, and what would have made it better.",
+        (
+            f"For quotes, backticks, dollar signs, or newlines in feedback text, prefer "
+            f"`agent-memory feedback {feedback_event_id} --stdin` with a JSON object containing "
+            "`overall`, `why`, `better`, `missing`, `note`, and `memory`."
+        ),
+        "The labels after `--memory` apply to individual memories, not the whole recall block.",
+        "Use per-memory labels: helpful, partial, irrelevant, stale, wrong.",
+    ]
+
+
+def _metadata_registry(project_root: Path) -> dict[str, list[str]]:
+    store = MemoryMetadataStore(project_root / ".agent-memory" / METADATA_FILENAME, read_only=True)
+    metadata_by_id = store.load_all()
+    values: dict[str, set[str]] = {
+        "kind": set(),
+        "subsystem": set(),
+        "workstream": set(),
+        "environment": set(),
+    }
+    for metadata in metadata_by_id.values():
+        for field in values:
+            value = getattr(metadata, field)
+            if value:
+                values[field].add(value)
+    return {
+        field: sorted(items, key=str.casefold)
+        for field, items in values.items()
+    }
+
+
+def _render_metadata_registry_block(project_root: Path) -> list[str]:
+    registry = _metadata_registry(project_root)
+    lines = ["Current metadata values so far:"]
+    for field in ("kind", "subsystem", "workstream", "environment"):
+        values = registry[field]
+        rendered = ", ".join(values) if values else "(none yet)"
+        lines.append(f"  - {field}: {rendered}")
+    return lines
+
+
+def render_save_nudge_block(project_root: Path) -> str:
+    return "\n".join((*SAVE_NUDGE_LINES, "", *_render_metadata_registry_block(project_root)))
+
+
+def _format_recalled_match(match: dict[str, Any]) -> str:
+    parts: list[str] = []
+    title = match.get("title")
+    if isinstance(title, str) and title:
+        parts.append(title)
+    for key, label in (
+        ("kind", "kind"),
+        ("subsystem", "subsystem"),
+        ("workstream", "workstream"),
+        ("environment", "env"),
+    ):
+        value = match.get(key)
+        if isinstance(value, str) and value:
+            parts.append(f"{label}: {value}")
+    text = match.get("text")
+    if isinstance(text, str) and text:
+        parts.append(text)
+    return " | ".join(parts)
+
+
+def render_auto_recall_block(
+    recalled_memories: list[dict[str, Any]],
+    *,
+    feedback_event_id: str | None,
+) -> str:
     lines = ["Here is some context from Agent Memory that might be related:"]
-    for text in recalled_memories:
-        lines.append(f"- {text}")
+    for match in recalled_memories:
+        lines.append(f"- [{match['alias']}] {match['memory_id']}: {_format_recalled_match(match)}")
     lines.append(AUTO_RECALL_FALLBACK)
+    lines.extend(render_feedback_instruction(feedback_event_id))
     return "\n".join(lines)
 
 
 def render_guidance_context(
-    recalled_memories: list[str] | None,
+    project_root: Path,
+    recalled_memories: list[dict[str, Any]] | None,
     *,
     consolidation_instruction: str | None,
+    feedback_event_id: str | None,
 ) -> str:
     lines = [
         "Agent Memory",
@@ -298,13 +440,18 @@ def render_guidance_context(
     ]
     if recalled_memories:
         lines.append("  - Here is some context from Agent Memory that might be related:")
-        for text in recalled_memories:
-            lines.append(f"    - {text}")
+        for match in recalled_memories:
+            lines.append(
+                f"    - [{match['alias']}] {match['memory_id']}: {_format_recalled_match(match)}"
+            )
         lines.append(f"  - {AUTO_RECALL_FALLBACK}")
+        for feedback_line in render_feedback_instruction(feedback_event_id):
+            lines.append(f"  - {feedback_line}")
     else:
         lines.append("  - Related memory may be injected automatically from the current user prompt when there is a strong match.")
         lines.append("  - If the injected context is missing or incomplete, call `agent-memory recall <task-shaped query>`.")
     lines.extend(["", *STORING_SECTION.splitlines()])
+    lines.extend(["", *_render_metadata_registry_block(project_root)])
     if consolidation_instruction:
         lines.extend(["", consolidation_instruction])
     return "\n".join(lines)

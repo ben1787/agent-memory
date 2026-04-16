@@ -36,7 +36,7 @@ You access it through the `agent-memory` CLI, invoked via your shell tool (Bash 
 
 ### Recall when useful
 
-The hook may inject strong prompt-matched memories automatically. If the answer is not already clear from the current context, code, or injected memory, ask yourself: *"Has prior work in this repo already discovered something that would change how I approach this?"* If yes, do a quick recall before broader research:
+The hook may inject strong prompt-matched memories automatically. The current auto-recall floor is a parent score of `0.7`. If the answer is not already clear from the current context, code, or injected memory, ask yourself: *"Has prior work in this repo already discovered something that would change how I approach this?"* If yes, do a quick recall before broader research:
 
 ```
 agent-memory recall <task-shaped query>
@@ -46,21 +46,25 @@ Phrase the query the way the answer would phrase itself, not the way a question 
 
 ### Save when something durable surfaced
 
-Before sending your final answer, ask: *"Did I just learn 0–3 durable things future-me would want to know without re-reading this whole conversation?"* If yes, save them — short, complete sentences, one fact per memory:
+Before sending your final answer, ask: *"Did I just resolve 0–3 durable repo-specific facts future-me would want without re-reading this whole conversation?"* If yes, save them. One strong operational fact is enough. Pass metadata as explicit command inputs and keep the body text plain:
 
 ```
-agent-memory save "<memory 1>" "<memory 2>"
+cat <<'EOF' | agent-memory save --title "Billing webhook handler" --kind "operational" --subsystem "billing" --workstream "webhooks" --environment "prod" --stdin
+Billing webhook handler lives in services/billing/webhooks.py. This saves a repo search when debugging Stripe events.
+EOF
 ```
 
-For memories with newlines, quotes, or other shell-hostile characters, pipe instead:
+For agents and anything with quotes, backticks, dollar signs, or newlines, prefer piped stdin so the shell cannot rewrite the text before `agent-memory` sees it. Prefer exact names in metadata: subsystem, file/module, endpoint, tool, class, table, feature flag, vendor, or dashboard names. Reuse existing spellings when they fit; otherwise create a new value. For a very short shell-safe one-liner, quoted positional args are still fine:
 
 ```
-echo "$MEMORY_TEXT" | agent-memory save --stdin
+agent-memory save --title "Billing webhook handler" --kind "operational" --subsystem "billing" --workstream "webhooks" --environment "prod" "Billing webhook handler lives in services/billing/webhooks.py."
 ```
 
 **Save these:**
 - Architectural decisions and the *why* behind them
 - File / module locations that were hard to find
+- Hook behavior, threshold/filter semantics, and other operational rules
+- Install/update gotchas and runtime quirks
 - Gotchas, footguns, bugs that took real time to diagnose
 - User preferences, especially explicit corrections
 - Non-obvious cross-component relationships
@@ -73,6 +77,12 @@ echo "$MEMORY_TEXT" | agent-memory save --stdin
 - Ephemeral debugging state or in-progress task notes
 - Long prose — prefer one fact per memory, ≤30 words
 
+**Worth saving test:**
+- Save it if it would save future code inspection, prevent a likely wrong assumption, or narrow the search path
+- Especially save concrete “how/why/where does this work?” facts you confirmed from code inspection or debugging
+- Use explicit metadata fields: `--title`, `--kind`, `--subsystem`, `--workstream`, and `--environment`
+- Keep the body text plain; metadata is not parsed out of the body
+
 ### Recover when you got it wrong
 
 You will save things you regret. That is expected — there is a recovery flow.
@@ -81,7 +91,10 @@ You will save things you regret. That is expected — there is a recovery flow.
 agent-memory list --recent 10               # most recent memories with their ids
 agent-memory show <memory_id>               # full text + metadata of one memory
 agent-memory edit <memory_id> "<new text>"  # replace text in place (re-embeds + rebuilds similarity edges)
-agent-memory edit <memory_id> --stdin       # multi-line / shell-hostile content
+agent-memory edit <memory_id> --kind "operational" --workstream "session_ids"  # metadata-only update
+cat <<'EOF' | agent-memory edit <memory_id> --title "New title" --stdin # multi-line / shell-hostile content
+<replacement text>
+EOF
 agent-memory delete <memory_id> --yes       # remove a memory entirely
 agent-memory undo                           # reverse the most recent save / edit / delete
 ```
@@ -96,6 +109,17 @@ agent-memory undo                           # reverse the most recent save / edi
 - Re-run install: `agent-memory init` from the project root
 <!-- agent-memory:end -->
 """
+LOCAL_STORE_INTRO = (
+    "This project has **Agent Memory** installed at `.agent-memory/` — a project-scoped "
+    "vector store of durable project knowledge that survives across sessions, agents, and "
+    "CLI invocations. It is the long-term memory you do not get from this file alone."
+)
+LOCAL_STORE_WHERE_IT_LIVES = (
+    "- Store: `.agent-memory/memory.kuzu` (durable, gitignored)\n"
+    "- Operations log: `.agent-memory/operations.log` (append-only audit trail; powers `undo`)\n"
+    "- Hook log: `.agent-memory/hook-events.jsonl` (use this to verify the prompt-submit hook is firing)\n"
+    "- Re-run install: `agent-memory init` from the project root"
+)
 
 
 def _toml_literal(value: str) -> str:
@@ -131,7 +155,7 @@ def suggest_project_root(start: Path | None = None) -> Path:
     return current
 
 
-def _server_payload(project_root: Path) -> dict[str, object]:
+def _server_payload(memory_project_root: Path) -> dict[str, object]:
     return {
         "type": "stdio",
         "command": sys.executable,
@@ -140,16 +164,16 @@ def _server_payload(project_root: Path) -> dict[str, object]:
             "agent_memory.cli",
             "serve-mcp",
             "--cwd",
-            str(project_root),
+            str(memory_project_root),
         ],
-        "cwd": str(project_root),
+        "cwd": str(memory_project_root),
         "env": {
-            "AGENT_MEMORY_PROJECT_ROOT": str(project_root),
+            "AGENT_MEMORY_PROJECT_ROOT": str(memory_project_root),
         },
     }
 
 
-def _codex_server_payload(project_root: Path) -> dict[str, object]:
+def _codex_server_payload(memory_project_root: Path) -> dict[str, object]:
     return {
         "command": sys.executable,
         "args": [
@@ -157,17 +181,17 @@ def _codex_server_payload(project_root: Path) -> dict[str, object]:
             "agent_memory.cli",
             "serve-mcp",
             "--cwd",
-            str(project_root),
+            str(memory_project_root),
         ],
-        "cwd": str(project_root),
+        "cwd": str(memory_project_root),
         "env": {
-            "AGENT_MEMORY_PROJECT_ROOT": str(project_root),
+            "AGENT_MEMORY_PROJECT_ROOT": str(memory_project_root),
         },
     }
 
 
-def _render_codex_mcp_server_block(project_root: Path, server_name: str = DEFAULT_SERVER_NAME) -> str:
-    payload = _codex_server_payload(project_root)
+def _render_codex_mcp_server_block(memory_project_root: Path, server_name: str = DEFAULT_SERVER_NAME) -> str:
+    payload = _codex_server_payload(memory_project_root)
     # Reason: paths (command/args/cwd/env values) must render as TOML literal
     # strings on Windows; basic strings would interpret backslashes as escapes.
     lines = [
@@ -373,7 +397,12 @@ def _resolve_git_dir(project_root: Path) -> Path | None:
     return None
 
 
-def install_mcp_server(project_root: Path, server_name: str = DEFAULT_SERVER_NAME) -> IntegrationResult:
+def install_mcp_server(
+    project_root: Path,
+    server_name: str = DEFAULT_SERVER_NAME,
+    *,
+    memory_project_root: Path | None = None,
+) -> IntegrationResult:
     mcp_path = project_root / MCP_FILENAME
     if mcp_path.exists():
         payload = json.loads(mcp_path.read_text(encoding='utf-8'))
@@ -389,7 +418,7 @@ def install_mcp_server(project_root: Path, server_name: str = DEFAULT_SERVER_NAM
     if not isinstance(servers, dict):
         raise ValueError(f"Expected {mcp_path} mcpServers to be a JSON object")
 
-    desired = _server_payload(project_root)
+    desired = _server_payload((memory_project_root or project_root).resolve())
     existing = servers.get(server_name)
     if existing == desired:
         return IntegrationResult(
@@ -449,11 +478,17 @@ def uninstall_mcp_server(project_root: Path, server_name: str = DEFAULT_SERVER_N
     )
 
 
-def install_codex_mcp_server(project_root: Path, server_name: str = DEFAULT_SERVER_NAME) -> IntegrationResult:
+def install_codex_mcp_server(
+    project_root: Path,
+    server_name: str = DEFAULT_SERVER_NAME,
+    *,
+    memory_project_root: Path | None = None,
+) -> IntegrationResult:
     codex_dir = project_root / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     config_path = codex_dir / CODEX_CONFIG_FILENAME
-    desired = _codex_server_payload(project_root)
+    resolved_memory_root = (memory_project_root or project_root).resolve()
+    desired = _codex_server_payload(resolved_memory_root)
     existed = config_path.exists()
 
     if existed:
@@ -472,10 +507,14 @@ def install_codex_mcp_server(project_root: Path, server_name: str = DEFAULT_SERV
                 status="unchanged",
                 details="Codex repo-local config already contains the agent-memory MCP entry.",
             )
-        rendered = _set_codex_mcp_server_cannot_fail(existing_text, project_root, server_name=server_name)
+        rendered = _set_codex_mcp_server_cannot_fail(
+            existing_text,
+            resolved_memory_root,
+            server_name=server_name,
+        )
         status = "updated"
     else:
-        rendered = _render_codex_mcp_server_block(project_root, server_name=server_name)
+        rendered = _render_codex_mcp_server_block(resolved_memory_root, server_name=server_name)
         status = "created"
 
     config_path.write_text(rendered, encoding='utf-8')
@@ -780,7 +819,7 @@ def remove_local_git_excludes(
     )
 
 
-def _shell_command_for_hook(project_root: Path, hook_name: str) -> str:
+def _shell_command_for_hook(memory_project_root: Path, hook_name: str) -> str:
     """Build a portable hook command line.
 
     Emits:
@@ -808,7 +847,7 @@ def _shell_command_for_hook(project_root: Path, hook_name: str) -> str:
     machine-specific. The form before that was just `agent-memory _hook ...`
     with no PATH prefix, which silently failed in real hook subprocesses.
     """
-    exports = f"AGENT_MEMORY_PROJECT_ROOT={shlex.quote(str(project_root))}"
+    exports = f"AGENT_MEMORY_PROJECT_ROOT={shlex.quote(str(memory_project_root.resolve()))}"
     path_prefix = "PATH=$HOME/.local/bin:$PATH"
     return f"{exports} {path_prefix} agent-memory _hook {hook_name}"
 
@@ -854,6 +893,7 @@ def install_claude_hooks(
     project_root: Path,
     *,
     register_mcp_server: bool = False,
+    memory_project_root: Path | None = None,
 ) -> IntegrationResult:
     claude_dir = project_root / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
@@ -882,7 +922,10 @@ def install_claude_hooks(
 
     prompt_hook = {
         "type": "command",
-        "command": _shell_command_for_hook(project_root, "claude-user-prompt-submit"),
+        "command": _shell_command_for_hook(
+            memory_project_root or project_root,
+            "claude-user-prompt-submit",
+        ),
         "timeout": 10,
     }
     # Drop ALL prior agent-memory hook command shapes before re-merging the
@@ -1184,7 +1227,11 @@ def uninstall_codex_feature_flag(project_root: Path) -> IntegrationResult:
     )
 
 
-def install_codex_hooks(project_root: Path) -> IntegrationResult:
+def install_codex_hooks(
+    project_root: Path,
+    *,
+    memory_project_root: Path | None = None,
+) -> IntegrationResult:
     codex_dir = project_root / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = codex_dir / CODEX_HOOKS_FILENAME
@@ -1199,7 +1246,10 @@ def install_codex_hooks(project_root: Path) -> IntegrationResult:
 
     prompt_hook = {
         "type": "command",
-        "command": _shell_command_for_hook(project_root, "codex-user-prompt-submit"),
+        "command": _shell_command_for_hook(
+            memory_project_root or project_root,
+            "codex-user-prompt-submit",
+        ),
         "timeout": 10,
         "statusMessage": "Recalling project memory",
     }
@@ -1295,11 +1345,49 @@ def uninstall_codex_hooks(project_root: Path) -> IntegrationResult:
     )
 
 
-def _inject_instructions_block(existing_text: str) -> tuple[str, bool]:
+def _render_instructions_block(
+    project_root: Path,
+    *,
+    memory_project_root: Path | None = None,
+) -> str:
+    resolved_project_root = project_root.resolve()
+    resolved_memory_root = (memory_project_root or project_root).resolve()
+    if resolved_project_root == resolved_memory_root:
+        return INSTRUCTIONS_BLOCK.rstrip("\n")
+
+    shared_store = resolved_memory_root / ".agent-memory"
+    shared_intro = (
+        f"This repo uses **Agent Memory** via the shared project store at `{shared_store}` — "
+        "durable project knowledge that survives across sessions, agents, and CLI invocations "
+        "for the wider workspace this repo lives inside."
+    )
+    shared_where_it_lives = (
+        f"- Shared store: `{shared_store / 'memory.kuzu'}`\n"
+        f"- Operations log: `{shared_store / 'operations.log'}`\n"
+        f"- Hook log: `{shared_store / 'hook-events.jsonl'}`\n"
+        f"- Re-run shared install: `agent-memory init {resolved_memory_root}`\n"
+        f"- Re-link this repo: `agent-memory link-root {resolved_project_root} --cwd {resolved_memory_root}`"
+    )
+    return (
+        INSTRUCTIONS_BLOCK.replace(LOCAL_STORE_INTRO, shared_intro)
+        .replace(LOCAL_STORE_WHERE_IT_LIVES, shared_where_it_lives)
+        .rstrip("\n")
+    )
+
+
+def _inject_instructions_block(
+    existing_text: str,
+    project_root: Path,
+    *,
+    memory_project_root: Path | None = None,
+) -> tuple[str, bool]:
     """Insert or replace the agent-memory block. Returns (new_text, changed)."""
     begin = INSTRUCTIONS_BEGIN_MARKER
     end = INSTRUCTIONS_END_MARKER
-    block = INSTRUCTIONS_BLOCK.rstrip("\n")
+    block = _render_instructions_block(
+        project_root,
+        memory_project_root=memory_project_root,
+    )
 
     begin_idx = existing_text.find(begin)
     end_idx = existing_text.find(end)
@@ -1348,7 +1436,11 @@ def _strip_instructions_block(existing_text: str) -> tuple[str, bool]:
     return (new_text, True)
 
 
-def install_memory_instructions(project_root: Path) -> list[IntegrationResult]:
+def install_memory_instructions(
+    project_root: Path,
+    *,
+    memory_project_root: Path | None = None,
+) -> list[IntegrationResult]:
     """Inject the Agent Memory instructions block into CLAUDE.md and AGENTS.md.
 
     Only updates files that already exist — never creates them. Idempotent via
@@ -1367,7 +1459,11 @@ def install_memory_instructions(project_root: Path) -> list[IntegrationResult]:
             )
             continue
         existing = path.read_text(encoding='utf-8')
-        new_text, changed = _inject_instructions_block(existing)
+        new_text, changed = _inject_instructions_block(
+            existing,
+            project_root,
+            memory_project_root=memory_project_root,
+        )
         if not changed:
             results.append(
                 IntegrationResult(
@@ -1488,30 +1584,141 @@ def _instructions_marker_present(project_root: Path) -> bool:
     return False
 
 
-def refresh_project_integration(project: ProjectContext, *, current_version: str) -> None:
+def _mcp_json_has_agent_memory_server(project_root: Path) -> bool:
+    path = project_root / MCP_FILENAME
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+    return isinstance(servers, dict) and DEFAULT_SERVER_NAME in servers
+
+
+def _codex_has_agent_memory_mcp_server(project_root: Path) -> bool:
+    config_path = project_root / ".codex" / CODEX_CONFIG_FILENAME
+    if not config_path.exists():
+        return False
+    try:
+        payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError):
+        return False
+    servers = payload.get("mcp_servers")
+    return isinstance(servers, dict) and DEFAULT_SERVER_NAME in servers
+
+
+def _claude_has_agent_memory_mcp_registration(project_root: Path) -> bool:
+    settings_path = project_root / ".claude" / CLAUDE_SETTINGS_LOCAL_FILENAME
+    if not settings_path.exists():
+        return False
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    enabled = payload.get("enabledMcpjsonServers") if isinstance(payload, dict) else None
+    return isinstance(enabled, list) and DEFAULT_SERVER_NAME in enabled
+
+
+def _configured_linked_roots(project: ProjectContext) -> list[Path]:
+    resolved: list[Path] = []
+    seen = {project.root.resolve()}
+    for raw_root in load_linked_project_roots(project.root):
+        if not raw_root:
+            continue
+        try:
+            candidate = Path(raw_root).expanduser().resolve()
+        except OSError:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        resolved.append(candidate)
+    return resolved
+
+
+def _refresh_integration_root(
+    integration_root: Path,
+    *,
+    memory_project_root: Path,
+) -> bool:
+    changed = False
+    if _mcp_json_has_agent_memory_server(integration_root):
+        install_mcp_server(
+            integration_root,
+            memory_project_root=memory_project_root,
+        )
+        changed = True
+    if _codex_has_agent_memory_mcp_server(integration_root):
+        install_codex_mcp_server(
+            integration_root,
+            memory_project_root=memory_project_root,
+        )
+        changed = True
+    if _claude_has_agent_memory_hooks(integration_root):
+        install_claude_hooks(
+            integration_root,
+            register_mcp_server=_claude_has_agent_memory_mcp_registration(integration_root),
+            memory_project_root=memory_project_root,
+        )
+        changed = True
+    if _codex_has_agent_memory_hooks(integration_root):
+        install_codex_feature_flag(integration_root)
+        install_codex_hooks(
+            integration_root,
+            memory_project_root=memory_project_root,
+        )
+        changed = True
+    if _instructions_marker_present(integration_root):
+        install_memory_instructions(
+            integration_root,
+            memory_project_root=memory_project_root,
+        )
+        changed = True
+    return changed
+
+
+def refresh_project_integration(
+    project: ProjectContext,
+    *,
+    current_version: str,
+    force: bool = False,
+) -> dict[str, object]:
     """Refresh hooks/instructions when the running binary version changes.
 
     Only touches integrations that are already present (agent-memory hooks or
     instruction markers). Always updates the stored integration version so the
     refresh runs once per binary version.
     """
-    if project.config.integration_version == current_version:
-        return
+    if not force and project.config.integration_version == current_version:
+        return {
+            "project_root": str(project.root),
+            "status": "unchanged",
+            "refreshed_roots": [],
+            "skipped_missing_roots": [],
+        }
 
-    has_claude = _claude_has_agent_memory_hooks(project.root)
-    has_codex = _codex_has_agent_memory_hooks(project.root)
-    has_instructions = _instructions_marker_present(project.root)
-
-    if has_claude:
-        install_claude_hooks(project.root, register_mcp_server=False)
-    if has_codex:
-        install_codex_hooks(project.root)
-    if has_instructions:
-        install_memory_instructions(project.root)
+    refreshed_roots: list[str] = []
+    skipped_missing_roots: list[str] = []
+    for integration_root in [project.root, *_configured_linked_roots(project)]:
+        if not integration_root.exists():
+            skipped_missing_roots.append(str(integration_root))
+            continue
+        if _refresh_integration_root(
+            integration_root,
+            memory_project_root=project.root,
+        ):
+            refreshed_roots.append(str(integration_root))
 
     project.config.integration_version = current_version
     project.config_path.write_text(
         json.dumps(project.config.to_dict(), indent=2) + "\n",
         encoding="utf-8",
     )
-from agent_memory.config import ProjectContext
+    return {
+        "project_root": str(project.root),
+        "status": "refreshed" if refreshed_roots or force else "unchanged",
+        "refreshed_roots": refreshed_roots,
+        "skipped_missing_roots": skipped_missing_roots,
+    }
+from agent_memory.config import ProjectContext, load_linked_project_roots

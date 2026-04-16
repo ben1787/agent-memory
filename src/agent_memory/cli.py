@@ -24,7 +24,15 @@ if sys.platform.startswith("win"):
         except (AttributeError, OSError):
             pass
 
-from agent_memory.config import ConfigError, MemoryConfig, init_project, is_project_root, load_project
+from agent_memory.config import (
+    ConfigError,
+    MemoryConfig,
+    init_project,
+    is_project_root,
+    load_linked_project_roots,
+    load_project,
+    write_linked_project_roots,
+)
 from agent_memory.embeddings import prune_fastembed_model_cache
 from agent_memory.engine import AgentMemory, open_memory_with_retry, reembed_project
 from agent_memory.integration import (
@@ -47,7 +55,22 @@ from agent_memory.integration import (
     uninstall_mcp_server,
     uninstall_memory_instructions,
 )
+from agent_memory.legacy_memory import entry_to_metadata, parse_legacy_memory_markdown
+from agent_memory.metadata_backfill import backfill_project_metadata, review_memories_with_codex
+from agent_memory.models import MemoryMetadata
 from agent_memory.mcp_server import serve
+from agent_memory.project_registry import (
+    list_registered_project_roots,
+    register_project_root,
+    registry_path,
+    unregister_project_root,
+)
+from agent_memory.retrieval_feedback import (
+    OVERALL_FEEDBACK_LABELS,
+    MEMORY_FEEDBACK_LABELS,
+    parse_feedback_assignments,
+    record_retrieval_feedback,
+)
 from agent_memory.repo_ingest import import_repo_corpus
 # smoke_test is POSIX-only (uses pty/fcntl/termios). Import lazily from inside
 # the command so `agent-memory --help` and every other command still work on
@@ -58,6 +81,7 @@ from agent_memory.hooks.common import (
     hook_log_entries,
     mark_consolidation_completed,
 )
+from agent_memory.write_lock import ProjectWriteLock
 
 
 from agent_memory import __display_version__, __version__
@@ -96,6 +120,7 @@ def _refresh_project_integration_if_needed() -> None:
     try:
         from agent_memory.integration import refresh_project_integration
 
+        register_project_root(project.root)
         refresh_project_integration(project, current_version=__display_version__)
     except Exception:
         # Never fail a real command because integration refresh failed.
@@ -246,6 +271,172 @@ def _load_project(cwd: Path):
     return project
 
 
+def _read_nonempty_stdin(*, empty_message: str) -> str:
+    body = sys.stdin.read().strip()
+    if not body:
+        raise typer.BadParameter(empty_message)
+    return body
+
+
+def _clean_metadata_option(value: str | None, *, current: str | None = None) -> str | None:
+    if value is None:
+        return current
+    cleaned = " ".join(value.split())
+    return cleaned or None
+
+
+def _build_memory_metadata(
+    *,
+    title: str | None,
+    kind: str | None,
+    subsystem: str | None,
+    workstream: str | None,
+    environment: str | None,
+    fallback: MemoryMetadata | None = None,
+    require_complete: bool,
+) -> MemoryMetadata:
+    metadata = MemoryMetadata(
+        title=_clean_metadata_option(title, current=fallback.title if fallback else None),
+        kind=_clean_metadata_option(kind, current=fallback.kind if fallback else None),
+        subsystem=_clean_metadata_option(subsystem, current=fallback.subsystem if fallback else None),
+        workstream=_clean_metadata_option(workstream, current=fallback.workstream if fallback else None),
+        environment=_clean_metadata_option(
+            environment,
+            current=fallback.environment if fallback else None,
+        ),
+    )
+    if not require_complete:
+        return metadata
+    missing = [
+        flag
+        for flag, value in (
+            ("--title", metadata.title),
+            ("--kind", metadata.kind),
+            ("--subsystem", metadata.subsystem),
+            ("--workstream", metadata.workstream),
+            ("--environment", metadata.environment),
+        )
+        if not value
+    ]
+    if missing:
+        raise typer.BadParameter(
+            "save requires explicit metadata: " + ", ".join(missing)
+        )
+    return metadata
+
+
+def _metadata_flags_provided(
+    *,
+    title: str | None,
+    kind: str | None,
+    subsystem: str | None,
+    workstream: str | None,
+    environment: str | None,
+) -> bool:
+    return any(
+        value is not None
+        for value in (title, kind, subsystem, workstream, environment)
+    )
+
+
+def _coerce_optional_feedback_text(
+    payload: dict[str, Any],
+    key: str,
+) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise typer.BadParameter(
+            f"Feedback stdin payload field `{key}` must be a string when provided."
+        )
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _parse_feedback_stdin_memory(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if not isinstance(value, list):
+        raise typer.BadParameter(
+            "Feedback stdin payload field `memory` must be a string, a list of strings, "
+            "or a list of {ref|alias|memory_id, label} objects."
+        )
+
+    parsed: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            cleaned = item.strip()
+            if cleaned:
+                parsed.append(cleaned)
+            continue
+        if not isinstance(item, dict):
+            raise typer.BadParameter(
+                "Feedback stdin payload field `memory` must contain only strings or objects."
+            )
+        label = item.get("label")
+        if not isinstance(label, str) or not label.strip():
+            raise typer.BadParameter(
+                "Feedback stdin memory objects must include a non-empty string `label`."
+            )
+        ref = item.get("ref")
+        if not isinstance(ref, str) or not ref.strip():
+            for alt in ("alias", "memory_id"):
+                candidate = item.get(alt)
+                if isinstance(candidate, str) and candidate.strip():
+                    ref = candidate
+                    break
+        if not isinstance(ref, str) or not ref.strip():
+            raise typer.BadParameter(
+                "Feedback stdin memory objects must include one of `ref`, `alias`, or `memory_id`."
+            )
+        parsed.append(f"{ref.strip()}={label.strip()}")
+    return parsed
+
+
+def _parse_feedback_stdin_payload(raw: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(
+            "Feedback stdin must be a JSON object with keys like "
+            "`overall`, `why`, `better`, `missing`, `note`, and `memory`."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(
+            "Feedback stdin must be a JSON object, not a list or plain string."
+        )
+
+    allowed = {"overall", "why", "better", "missing", "note", "memory", "memory_feedback"}
+    unknown = sorted(key for key in payload if key not in allowed)
+    if unknown:
+        raise typer.BadParameter(
+            "Unknown feedback stdin payload field(s): "
+            + ", ".join(unknown)
+            + ". Allowed fields: overall, why, better, missing, note, memory."
+        )
+
+    if "memory" in payload and "memory_feedback" in payload:
+        raise typer.BadParameter(
+            "Feedback stdin payload cannot include both `memory` and `memory_feedback`."
+        )
+
+    memory_items = _parse_feedback_stdin_memory(
+        payload.get("memory", payload.get("memory_feedback"))
+    )
+    return {
+        "memory": memory_items,
+        "overall": _coerce_optional_feedback_text(payload, "overall"),
+        "why": _coerce_optional_feedback_text(payload, "why"),
+        "better": _coerce_optional_feedback_text(payload, "better"),
+        "missing": _coerce_optional_feedback_text(payload, "missing"),
+        "note": _coerce_optional_feedback_text(payload, "note"),
+    }
+
+
 def _resolve_init_path(path: Path | None) -> Path:
     if path is not None:
         return path.resolve()
@@ -277,6 +468,195 @@ def _discover_existing_project_root(path: Path | None) -> Path | None:
         return load_project(candidate).root
     except ConfigError:
         return None
+
+
+def _persist_linked_roots(project, linked_roots: list[Path]) -> None:
+    normalized = [str(root.resolve()) for root in linked_roots]
+    if load_linked_project_roots(project.root) == normalized:
+        return
+    write_linked_project_roots(project.root, normalized)
+
+
+def _linked_roots(project) -> list[Path]:
+    roots: list[Path] = []
+    seen = {project.root.resolve()}
+    for raw_root in load_linked_project_roots(project.root):
+        if not raw_root:
+            continue
+        try:
+            resolved = Path(raw_root).expanduser().resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        roots.append(resolved)
+    return roots
+
+
+def _validate_link_root(project_root: Path, link_root: Path) -> Path:
+    resolved_project_root = project_root.resolve()
+    resolved_link_root = link_root.resolve()
+    if resolved_link_root == resolved_project_root:
+        raise typer.BadParameter("Cannot link the project root to itself.", param_hint="--link-root")
+    if not resolved_link_root.exists() or not resolved_link_root.is_dir():
+        raise typer.BadParameter(
+            f"Linked repo path does not exist or is not a directory: {resolved_link_root}",
+            param_hint="--link-root",
+        )
+    if not resolved_link_root.is_relative_to(resolved_project_root):
+        raise typer.BadParameter(
+            "Linked repos must live under the shared project root so CLI lookups stay unambiguous.",
+            param_hint="--link-root",
+        )
+    if is_project_root(resolved_link_root):
+        raise typer.BadParameter(
+            f"{resolved_link_root} already has its own .agent-memory store. Uninstall that store before linking it to {resolved_project_root}.",
+            param_hint="--link-root",
+        )
+    return resolved_link_root
+
+
+def _install_linked_root(
+    project,
+    linked_root: Path,
+    *,
+    install_mcp: bool,
+    install_local_excludes: bool,
+    install_codex: bool,
+    install_codex_trust: bool,
+    install_claude: bool,
+) -> dict[str, object]:
+    results: list[dict[str, object]] = []
+
+    if install_local_excludes:
+        results.append(_result_payload(ensure_local_git_excludes(linked_root)))
+    if install_mcp:
+        results.append(
+            _result_payload(
+                install_mcp_server(
+                    linked_root,
+                    memory_project_root=project.root,
+                )
+            )
+        )
+    if install_codex:
+        results.append(_result_payload(install_codex_feature_flag(linked_root)))
+        results.append(
+            _result_payload(
+                install_codex_hooks(
+                    linked_root,
+                    memory_project_root=project.root,
+                )
+            )
+        )
+        if install_mcp:
+            results.append(
+                _result_payload(
+                    install_codex_mcp_server(
+                        linked_root,
+                        memory_project_root=project.root,
+                    )
+                )
+            )
+        if install_codex_trust:
+            results.append(_result_payload(install_codex_project_trust(linked_root)))
+    if install_claude:
+        results.append(
+            _result_payload(
+                install_claude_hooks(
+                    linked_root,
+                    register_mcp_server=install_mcp,
+                    memory_project_root=project.root,
+                )
+            )
+        )
+
+    for instructions_result in install_memory_instructions(
+        linked_root,
+        memory_project_root=project.root,
+    ):
+        results.append(_result_payload(instructions_result))
+
+    return {
+        "linked_root": str(linked_root),
+        "results": results,
+    }
+
+
+def _link_project_roots(
+    project,
+    link_roots: list[Path],
+    *,
+    install_mcp: bool,
+    install_local_excludes: bool,
+    install_codex: bool,
+    install_codex_trust: bool,
+    install_claude: bool,
+) -> list[dict[str, object]]:
+    existing = _linked_roots(project)
+    linked_results: list[dict[str, object]] = []
+    for link_root in link_roots:
+        resolved_link_root = _validate_link_root(project.root, link_root)
+        if resolved_link_root not in existing:
+            existing.append(resolved_link_root)
+        linked_results.append(
+            _install_linked_root(
+                project,
+                resolved_link_root,
+                install_mcp=install_mcp,
+                install_local_excludes=install_local_excludes,
+                install_codex=install_codex,
+                install_codex_trust=install_codex_trust,
+                install_claude=install_claude,
+            )
+        )
+    _persist_linked_roots(project, existing)
+    return linked_results
+
+
+def _refresh_integrations_payload(
+    *,
+    cwd: Path,
+    all_known: bool,
+) -> dict[str, object]:
+    roots = list_registered_project_roots() if all_known else []
+    try:
+        current_project = load_project(cwd)
+    except ConfigError:
+        current_project = None
+    if current_project is not None and current_project.root not in roots:
+        roots.append(current_project.root)
+    ordered_roots = sorted({root.resolve() for root in roots}, key=lambda root: str(root))
+
+    payloads: list[dict[str, object]] = []
+    missing_roots: list[str] = []
+    for root in ordered_roots:
+        if not root.exists():
+            missing_roots.append(str(root))
+            unregister_project_root(root)
+            continue
+        try:
+            project = load_project(root, exact=True)
+        except ConfigError:
+            missing_roots.append(str(root))
+            unregister_project_root(root)
+            continue
+        from agent_memory.integration import refresh_project_integration
+
+        register_project_root(project.root)
+        payloads.append(
+            refresh_project_integration(
+                project,
+                current_version=__display_version__,
+                force=True,
+            )
+        )
+    return {
+        "registry_path": str(registry_path()),
+        "refreshed_projects": payloads,
+        "missing_roots": missing_roots,
+    }
 
 
 def _default_smoke_reinstall_from(cwd: Path | None = None) -> Path | None:
@@ -589,6 +969,7 @@ def _doctor_payload(cwd: Path) -> dict[str, object]:
 
 def _run_init(
     path: Path | None,
+    link_roots: list[Path],
     embedding_backend: str,
     force: bool,
     install_mcp: bool,
@@ -601,10 +982,13 @@ def _run_init(
     config = MemoryConfig(embedding_backend=embedding_backend)
     try:
         project = init_project(resolved_path, config=config, force=force)
-        store = GraphStore(project.db_path, config.embedding_dimensions)
-        store.close()
+        with ProjectWriteLock(project.root):
+            store = GraphStore(project.db_path, config.embedding_dimensions)
+            store.close()
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+    register_project_root(project.root)
 
     typer.echo(f"Initialized Agent Memory at {project.root}")
     typer.echo(f"Config: {project.config_path}")
@@ -654,6 +1038,24 @@ def _run_init(
     for result in instructions_results:
         typer.echo(f"Instructions ({result.path.name}): {result.details}")
 
+    if link_roots:
+        linked_results = _link_project_roots(
+            project,
+            link_roots,
+            install_mcp=install_mcp,
+            install_local_excludes=install_local_excludes,
+            install_codex=install_codex,
+            install_codex_trust=install_codex_trust,
+            install_claude=install_claude,
+        )
+        for linked_payload in linked_results:
+            typer.echo(f"Linked repo: {linked_payload['linked_root']}")
+            results = linked_payload["results"]
+            assert isinstance(results, list)
+            for result in results:
+                if isinstance(result, dict):
+                    typer.echo(f"  {result.get('details')}")
+
     typer.echo(
         "Access pattern: agents call `agent-memory recall <query>` and "
         "`agent-memory save \"<memory>\"` via their shell tool. The CLI is the canonical interface; "
@@ -667,6 +1069,12 @@ def _project_uninstall_payload(
     remove_store: bool,
     remove_codex_trust: bool,
 ) -> dict[str, object]:
+    project = None
+    if is_project_root(project_root):
+        try:
+            project = load_project(project_root, exact=True)
+        except ConfigError:
+            project = None
     local_exclude_entries = [entry for entry in [
         ".claude/settings.local.json",
         ".codex/config.toml",
@@ -728,12 +1136,48 @@ def _project_uninstall_payload(
     _remove_if_empty(project_root / ".codex")
     _remove_if_empty(project_root / ".claude")
 
+    linked_root_payloads: list[dict[str, object]] = []
+    if remove_store and project is not None:
+        for linked_root in _linked_roots(project):
+            linked_results: list[tuple[str, object]] = [
+                ("mcp", uninstall_mcp_server(linked_root)),
+                ("codex_hooks", uninstall_codex_hooks(linked_root)),
+                ("codex_feature_flag", uninstall_codex_feature_flag(linked_root)),
+                ("codex_mcp", uninstall_codex_mcp_server(linked_root)),
+                ("claude_hooks", uninstall_claude_hooks(linked_root)),
+                (
+                    "local_excludes",
+                    remove_local_git_excludes(
+                        linked_root,
+                        entries=[
+                            ".claude/settings.local.json",
+                            ".codex/config.toml",
+                            ".codex/hooks.json",
+                            ".mcp.json",
+                        ],
+                    ),
+                ),
+            ]
+            for instructions_result in uninstall_memory_instructions(linked_root):
+                linked_results.append((f"instructions:{instructions_result.path.name}", instructions_result))
+            if remove_codex_trust:
+                linked_results.append(("codex_trust", uninstall_codex_project_trust(linked_root)))
+            _remove_if_empty(linked_root / ".codex")
+            _remove_if_empty(linked_root / ".claude")
+            linked_root_payloads.append(
+                {
+                    "project_root": str(linked_root),
+                    "results": {name: _result_payload(result) for name, result in linked_results},
+                }
+            )
+
     payload = {
         "project_root": str(project_root),
         "remove_store": remove_store,
         "remove_codex_trust": remove_codex_trust,
         "results": {name: _result_payload(result) for name, result in results},
         "store": store_result,
+        "linked_roots": linked_root_payloads,
     }
 
     return payload
@@ -752,6 +1196,8 @@ def _run_uninstall(
         remove_store=remove_store,
         remove_codex_trust=remove_codex_trust,
     )
+    if remove_store:
+        unregister_project_root(project_root)
 
     if as_json:
         typer.echo(json.dumps(payload, indent=2))
@@ -764,6 +1210,17 @@ def _run_uninstall(
     store_result = payload["store"]
     if isinstance(store_result, dict):
         typer.echo(f"store: {store_result.get('details')}")
+    linked_payloads = payload.get("linked_roots")
+    if isinstance(linked_payloads, list):
+        for linked_payload in linked_payloads:
+            if not isinstance(linked_payload, dict):
+                continue
+            typer.echo(f"linked_root: {linked_payload.get('project_root')}")
+            results = linked_payload.get("results")
+            if isinstance(results, dict):
+                for name, result in results.items():
+                    if isinstance(result, dict):
+                        typer.echo(f"  {name}: {result.get('details')}")
 
 
 def _system_uninstall_payload() -> dict[str, object]:
@@ -908,6 +1365,12 @@ def init(
         help="Project directory that should hold the local memory store.",
         resolve_path=True,
     ),
+    link_roots: list[Path] = typer.Option(
+        [],
+        "--link-root",
+        help="Descendant repo root to wire to this shared store as a linked integration root. Repeat for multiple child repos.",
+        resolve_path=True,
+    ),
     embedding_backend: str = typer.Option(
         "fastembed",
         "--embedding-backend",
@@ -946,6 +1409,7 @@ def init(
 ) -> None:
     _run_init(
         path=path,
+        link_roots=link_roots,
         embedding_backend=embedding_backend,
         force=force,
         install_mcp=install_mcp,
@@ -968,6 +1432,12 @@ def setup(
         help="Project directory that should hold the local memory store.",
         resolve_path=True,
     ),
+    link_roots: list[Path] = typer.Option(
+        [],
+        "--link-root",
+        help="Descendant repo root to wire to this shared store as a linked integration root. Repeat for multiple child repos.",
+        resolve_path=True,
+    ),
     embedding_backend: str = typer.Option(
         "fastembed",
         "--embedding-backend",
@@ -986,6 +1456,7 @@ def setup(
 ) -> None:
     _run_init(
         path=path,
+        link_roots=link_roots,
         embedding_backend=embedding_backend,
         force=force,
         install_mcp=install_mcp,
@@ -994,6 +1465,84 @@ def setup(
         install_codex_trust=True,
         install_claude=True,
     )
+
+
+@app.command(
+    name="link-root",
+    help=(
+        "Wire one or more descendant repos to the current project's shared Agent Memory store. "
+        "This installs repo-local hooks/instructions in the child repos but points them at the parent store."
+    ),
+)
+def link_root_command(
+    link_roots: list[Path] = typer.Argument(
+        ...,
+        help="Descendant repo root(s) to wire to the current shared store.",
+        resolve_path=True,
+    ),
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project root (or any path inside it) that owns the shared Agent Memory store.",
+        resolve_path=True,
+    ),
+    install_mcp: bool = typer.Option(
+        False,
+        "--with-mcp/--without-mcp",
+        help="Also install repo-local MCP server entries in linked repos.",
+    ),
+    install_local_excludes: bool = typer.Option(
+        True,
+        "--install-local-excludes/--no-install-local-excludes",
+        help="Hide local linked-repo integration files via .git/info/exclude when possible.",
+    ),
+    install_codex: bool = typer.Option(
+        True,
+        "--install-codex-hooks/--no-install-codex-hooks",
+        help="Install Codex repo-local prompt hooks in linked repos.",
+    ),
+    install_codex_trust: bool = typer.Option(
+        True,
+        "--install-codex-trust/--no-install-codex-trust",
+        help="Trust linked repos in Codex so their repo-local config loads.",
+    ),
+    install_claude: bool = typer.Option(
+        True,
+        "--install-claude-hooks/--no-install-claude-hooks",
+        help="Install Claude local prompt hooks in linked repos.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    try:
+        project = load_project(cwd, exact=is_project_root(cwd))
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    register_project_root(project.root)
+    linked_results = _link_project_roots(
+        project,
+        link_roots,
+        install_mcp=install_mcp,
+        install_local_excludes=install_local_excludes,
+        install_codex=install_codex,
+        install_codex_trust=install_codex_trust,
+        install_claude=install_claude,
+    )
+    payload = {
+        "project_root": str(project.root),
+        "linked_roots": linked_results,
+        "registered_linked_roots": [str(root) for root in _linked_roots(project)],
+    }
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    typer.echo(f"Project root: {project.root}")
+    for linked_payload in linked_results:
+        typer.echo(f"Linked repo: {linked_payload['linked_root']}")
+        results = linked_payload["results"]
+        assert isinstance(results, list)
+        for result in results:
+            if isinstance(result, dict):
+                typer.echo(f"  {result.get('details')}")
 
 
 @app.command(
@@ -1055,6 +1604,7 @@ def uninstall_all(
             remove_store=True,
             remove_codex_trust=True,
         )
+        unregister_project_root(project_root)
 
     system_payload = _system_uninstall_payload()
     payload = {
@@ -1105,16 +1655,22 @@ def uninstall_all(
 
 @app.command(
     help=(
-        "Save one or more memories into the current project store. "
-        "Pass multiple quoted arguments to batch-save in one command, "
-        "or pipe a single memory body via --stdin to avoid shell-escaping multi-line text."
+        "Save one memory into the current project store with explicit metadata fields. "
+        "Pass the body as a positional argument for short shell-safe text, or prefer "
+        "piping the body on stdin for agents and shell-hostile content. If stdin is "
+        "already piped and no positional text is given, save reads from stdin automatically."
     )
 )
 def save(
-    texts: list[str] = typer.Argument(
+    text: str | None = typer.Argument(
         None,
-        help="One or more memory texts to persist. Omit when using --stdin.",
+        help="Memory body to persist. Omit when using --stdin.",
     ),
+    title: str = typer.Option(..., "--title", help="Short durable title for the memory."),
+    kind: str = typer.Option(..., "--kind", help="Memory kind, e.g. operational or preference."),
+    subsystem: str = typer.Option(..., "--subsystem", help="Primary subsystem this memory belongs to."),
+    workstream: str = typer.Option(..., "--workstream", help="Narrow workstream within the subsystem."),
+    environment: str = typer.Option(..., "--environment", help="Environment scope, e.g. local, dev, qa, prod."),
     cwd: Path = typer.Option(
         Path("."),
         "--cwd",
@@ -1124,51 +1680,84 @@ def save(
     from_stdin: bool = typer.Option(
         False,
         "--stdin",
-        help="Read a single memory body from stdin instead of taking it as an argument. Useful for memories with quotes, newlines, or other shell-hostile characters.",
+        help=(
+            "Explicitly read a single memory body from stdin instead of taking it as an "
+            "argument. Optional when stdin is already piped and no positional text is given."
+        ),
     ),
     as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
+    if from_stdin and text is not None:
+        raise typer.BadParameter("--stdin cannot be combined with a positional memory body.")
+
     if from_stdin:
-        if texts:
-            raise typer.BadParameter("--stdin cannot be combined with positional memory arguments.")
-        body = sys.stdin.read().strip()
-        if not body:
-            raise typer.BadParameter("--stdin received empty input; nothing to save.")
-        texts = [body]
-    elif not texts:
-        raise typer.BadParameter("Provide at least one memory argument, or use --stdin.")
+        resolved_text = _read_nonempty_stdin(
+            empty_message="--stdin received empty input; nothing to save."
+        )
+    elif text is None:
+        if sys.stdin.isatty():
+            raise typer.BadParameter("Provide memory text, or pipe a body on stdin.")
+        resolved_text = _read_nonempty_stdin(
+            empty_message="stdin was piped but empty; provide memory text or pipe a body to save."
+        )
+    else:
+        resolved_text = text
+
+    metadata = _build_memory_metadata(
+        title=title,
+        kind=kind,
+        subsystem=subsystem,
+        workstream=workstream,
+        environment=environment,
+        require_complete=True,
+    )
 
     memory = _open_memory(cwd)
     try:
-        result = memory.save(texts)
+        result = memory.save(resolved_text, metadata=metadata)
     finally:
         memory.close()
     payload = result.to_dict()
     if as_json:
         _emit(payload, True)
         return
-    saved = payload["saved"]
-    if len(saved) == 1:
-        item = saved[0]
-        typer.echo(f"Saved {item['memory_id']}")
-        typer.echo(f"Created at: {item['created_at']}")
-        typer.echo(f"Connected neighbors: {len(item['connected_neighbors'])}")
-        for neighbor in item["connected_neighbors"]:
-            typer.echo(
-                f"  {neighbor['memory_id']}  similarity={neighbor['similarity']}"
-            )
-    else:
-        typer.echo(f"Saved {len(saved)} memories")
-        for item in saved:
-            typer.echo(f"  {item['memory_id']}  created_at={item['created_at']}")
+    item = payload["saved"][0]
+    typer.echo(f"Saved {item['memory_id']}")
+    typer.echo(f"Created at: {item['created_at']}")
+    item_metadata = item.get("metadata")
+    if isinstance(item_metadata, dict):
+        if item_metadata.get("title"):
+            typer.echo(f"Title: {item_metadata['title']}")
+        for key, label in (
+            ("kind", "Kind"),
+            ("subsystem", "Subsystem"),
+            ("workstream", "Workstream"),
+            ("environment", "Environment"),
+        ):
+            value = item_metadata.get(key)
+            if isinstance(value, str) and value:
+                typer.echo(f"{label}: {value}")
+    typer.echo(f"Connected neighbors: {len(item['connected_neighbors'])}")
+    for neighbor in item["connected_neighbors"]:
+        typer.echo(
+            f"  {neighbor['memory_id']}  similarity={neighbor['similarity']}"
+        )
     typer.echo(f"Total memories: {payload['total_memories']}")
 
 
 def _format_memory_record(record, *, show_full_text: bool = True) -> dict:
+    display_text = record.display_text()
     payload = {
         "memory_id": record.id,
         "created_at": record.created_at,
         "text": record.text if show_full_text else (record.text[:140] + "…" if len(record.text) > 140 else record.text),
+        "display_text": display_text if show_full_text else (display_text[:140] + "…" if len(display_text) > 140 else display_text),
+        "metadata": record.metadata.to_dict(),
+        "title": record.metadata.title,
+        "kind": record.metadata.kind,
+        "subsystem": record.metadata.subsystem,
+        "workstream": record.metadata.workstream,
+        "environment": record.metadata.environment,
         "access_count": record.access_count,
         "last_accessed": record.last_accessed,
     }
@@ -1230,7 +1819,8 @@ def list_command(
     for record in records:
         typer.echo("")
         typer.echo(f"  {record.id}  ({record.created_at})")
-        typer.echo(f"    {record.text}")
+        for line in record.display_text().splitlines():
+            typer.echo(f"    {line}")
 
 
 @app.command(
@@ -1264,16 +1854,16 @@ def show_command(
     if record.last_accessed:
         typer.echo(f"last_accessed: {record.last_accessed}")
     typer.echo("")
-    typer.echo(record.text)
+    typer.echo(record.display_text())
 
 
 @app.command(
     name="edit",
     help=(
-        "Edit a memory's text in place and re-embed it. "
-        "Three input modes: pass new text as a positional argument (one-shot), "
-        "use --stdin for multi-line / shell-hostile content, or omit text entirely "
-        "to open $EDITOR with the current memory body prefilled."
+        "Edit a memory's body text and/or metadata in place and re-embed it. "
+        "Pass new text as a positional argument for a one-shot edit, pipe or use "
+        "--stdin for multi-line content, or omit text entirely to update metadata "
+        "only or open $EDITOR with the current body prefilled."
     ),
 )
 def edit_command(
@@ -1281,6 +1871,23 @@ def edit_command(
     new_text: str | None = typer.Argument(
         None,
         help="New text for the memory. Omit to use --stdin or $EDITOR.",
+    ),
+    title: str | None = typer.Option(None, "--title", help="Updated title. Omit to keep the current title."),
+    kind: str | None = typer.Option(None, "--kind", help="Updated kind. Omit to keep the current kind."),
+    subsystem: str | None = typer.Option(
+        None,
+        "--subsystem",
+        help="Updated subsystem. Omit to keep the current subsystem.",
+    ),
+    workstream: str | None = typer.Option(
+        None,
+        "--workstream",
+        help="Updated workstream. Omit to keep the current workstream.",
+    ),
+    environment: str | None = typer.Option(
+        None,
+        "--environment",
+        help="Updated environment. Omit to keep the current environment.",
     ),
     cwd: Path = typer.Option(
         Path("."),
@@ -1291,46 +1898,73 @@ def edit_command(
     from_stdin: bool = typer.Option(
         False,
         "--stdin",
-        help="Read the new memory body from stdin instead of taking it as an argument.",
+        help=(
+            "Explicitly read the new memory body from stdin instead of taking it as an "
+            "argument. Optional when stdin is already piped and no positional text is given."
+        ),
     ),
     as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
     if from_stdin and new_text is not None:
         raise typer.BadParameter("--stdin cannot be combined with a positional new-text argument.")
 
+    metadata_requested = _metadata_flags_provided(
+        title=title,
+        kind=kind,
+        subsystem=subsystem,
+        workstream=workstream,
+        environment=environment,
+    )
+
     if from_stdin:
-        body = sys.stdin.read().strip()
-        if not body:
-            raise typer.BadParameter("--stdin received empty input; nothing to write.")
-        resolved_text: str | None = body
+        resolved_text: str | None = _read_nonempty_stdin(
+            empty_message="--stdin received empty input; nothing to write."
+        )
+    elif new_text is None and not sys.stdin.isatty() and not metadata_requested:
+        resolved_text = _read_nonempty_stdin(
+            empty_message="stdin was piped but empty; provide new text or pipe a body to write."
+        )
     else:
         resolved_text = new_text
 
     memory = _open_memory(cwd)
     try:
-        if resolved_text is None:
-            # $EDITOR mode: prefill a temp file with the current text, let the user edit, read it back.
-            existing = memory.get(memory_id)
-            if existing is None:
-                typer.echo(f"No memory with id {memory_id!r}.", err=True)
-                raise typer.Exit(code=1)
-            edited = typer.edit(existing.text, extension=".md")
-            if edited is None:
-                typer.echo("Edit aborted (no editor or no save). Memory unchanged.")
-                raise typer.Exit(code=1)
-            resolved_text = edited.strip()
-            if resolved_text == existing.text.strip():
-                typer.echo("No changes detected. Memory unchanged.")
-                raise typer.Exit(code=0)
-            if not resolved_text:
-                typer.echo("Editor produced empty content. Memory unchanged.", err=True)
-                raise typer.Exit(code=1)
-
-        try:
-            updated = memory.edit(memory_id, resolved_text)
-        except KeyError:
+        existing = memory.get(memory_id)
+        if existing is None:
             typer.echo(f"No memory with id {memory_id!r}.", err=True)
             raise typer.Exit(code=1)
+
+        metadata = _build_memory_metadata(
+            title=title,
+            kind=kind,
+            subsystem=subsystem,
+            workstream=workstream,
+            environment=environment,
+            fallback=existing.metadata,
+            require_complete=False,
+        )
+
+        if resolved_text is None:
+            if metadata_requested:
+                resolved_text = existing.text
+            else:
+                edited = typer.edit(existing.text, extension=".md")
+                if edited is None:
+                    typer.echo("Edit aborted (no editor or no save). Memory unchanged.")
+                    raise typer.Exit(code=1)
+                resolved_text = edited.strip()
+                if not resolved_text:
+                    typer.echo("Editor produced empty content. Memory unchanged.", err=True)
+                    raise typer.Exit(code=1)
+
+        if (
+            resolved_text.strip() == existing.text.strip()
+            and metadata.to_dict() == existing.metadata.to_dict()
+        ):
+            typer.echo("No changes detected. Memory unchanged.")
+            raise typer.Exit(code=0)
+
+        updated = memory.edit(memory_id, resolved_text, metadata=metadata)
     finally:
         memory.close()
 
@@ -1338,7 +1972,116 @@ def edit_command(
         _emit(_format_memory_record(updated), True)
         return
     typer.echo(f"Updated {updated.id}")
-    typer.echo(updated.text)
+    typer.echo(updated.display_text())
+
+
+@app.command(
+    name="backfill-metadata",
+    help=(
+        "Generate explicit metadata for existing memories in a project store, write the "
+        "metadata sidecar, and re-embed the project so metadata participates in recall."
+    ),
+)
+def backfill_metadata_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Regenerate metadata even for memories that already have metadata.",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Only backfill the first N memories. Useful for sampling or staged migrations.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview the migration counts and sample reviewed metadata without writing anything.",
+    ),
+    reviewer: str = typer.Option(
+        "codex",
+        "--reviewer",
+        help="Metadata reviewer to use. Only `codex` is supported for this command.",
+    ),
+    model: str = typer.Option(
+        "gpt-5.4-mini",
+        "--model",
+        help="Codex model to use when reviewer=codex.",
+    ),
+    batch_size: int = typer.Option(
+        1,
+        "--batch-size",
+        min=1,
+        help="How many memories to send per review request. Default 1 reviews each memory independently.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    if reviewer != "codex":
+        raise typer.BadParameter("Only `codex` is supported for this command.", param_hint="--reviewer")
+
+    project = _load_project(cwd)
+    memory = _open_memory(project.root, read_only=True)
+    try:
+        records = memory.list_all()
+    finally:
+        memory.close()
+
+    selected = records if limit is None else records[:limit]
+    candidate_records = [
+        record
+        for record in selected
+        if overwrite or record.metadata.is_empty()
+    ]
+    candidates: list[dict[str, object]] = []
+    sample_size = min(10, len(candidate_records))
+    if sample_size:
+        if reviewer == "codex":
+            for record in candidate_records[:sample_size]:
+                reviewed = review_memories_with_codex([record], model=model)
+                _, metadata = reviewed[0]
+                candidates.append(
+                    {
+                        "memory_id": record.id,
+                        "metadata": metadata.to_dict(),
+                        "preview": record.text[:140] + ("…" if len(record.text) > 140 else ""),
+                    }
+                )
+
+    if dry_run:
+        payload = {
+            "project_root": str(project.root),
+            "total_memories": len(records),
+            "candidate_memories": len(candidate_records),
+            "updated_memories": len(candidate_records),
+            "overwrite": overwrite,
+            "reviewer": reviewer,
+            "model": model if reviewer == "codex" else None,
+            "batch_size": batch_size,
+            "sample": candidates[:10],
+        }
+        _emit(payload, as_json)
+        return
+
+    result = backfill_project_metadata(
+        project.root,
+        overwrite=overwrite,
+        limit=limit,
+        reviewer=reviewer,
+        batch_size=batch_size,
+        model=model,
+    )
+    payload = {
+        "project_root": str(project.root),
+        **result.to_dict(),
+    }
+    _emit(payload, as_json)
 
 
 @app.command(
@@ -1470,6 +2213,140 @@ def capture_turn(
     for item in payload["saved"]:
         typer.echo(f"  {item['memory_id']}  created_at={item['created_at']}")
     typer.echo(f"Total memories: {payload['total_memories']}")
+
+
+@app.command(
+    help=(
+        "Record structured feedback about a prompt-time memory injection event. "
+        "Use the event id and aliases shown in the injected Agent Memory context."
+    )
+)
+def feedback(
+    event_id: str = typer.Argument(
+        ...,
+        help="Retrieval event id from the injected prompt context, e.g. evt_ab12cd34ef.",
+    ),
+    from_stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help=(
+            "Read a JSON payload for overall/why/better/missing/note/memory from stdin. "
+            "Optional when stdin is already piped and no inline feedback flags are given."
+        ),
+    ),
+    memory: list[str] = typer.Option(
+        [],
+        "--memory",
+        help=(
+            "Per-memory feedback as alias-or-memory-id=label, e.g. A=helpful or mem_xxx=stale. "
+            f"Labels: {', '.join(sorted(MEMORY_FEEDBACK_LABELS))}."
+        ),
+    ),
+    overall: str | None = typer.Option(
+        None,
+        "--overall",
+        help=f"Overall label for the whole injection event: {', '.join(sorted(OVERALL_FEEDBACK_LABELS))}.",
+    ),
+    why: str | None = typer.Option(
+        None,
+        "--why",
+        help="Short event-level explanation of why the recalled set was or was not useful.",
+    ),
+    better: str | None = typer.Option(
+        None,
+        "--better",
+        help="Short event-level note on what would have made the recalled set better.",
+    ),
+    missing: str | None = typer.Option(
+        None,
+        "--missing",
+        help="Optional short note about what should have surfaced but did not.",
+    ),
+    note: str | None = typer.Option(
+        None,
+        "--note",
+        help="Optional short freeform note about the retrieval quality.",
+    ),
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+    ) -> None:
+    try:
+        project = load_project(cwd, exact=is_project_root(cwd))
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    inline_feedback_present = bool(memory or overall or why or better or missing or note)
+    if from_stdin:
+        if inline_feedback_present:
+            raise typer.BadParameter(
+                "--stdin cannot be combined with --memory, --overall, --why, --better, --missing, or --note."
+            )
+        stdin_payload = _parse_feedback_stdin_payload(
+            _read_nonempty_stdin(
+                empty_message="--stdin received empty input; provide a JSON feedback payload."
+            )
+        )
+        memory = list(stdin_payload["memory"])
+        overall = stdin_payload["overall"]
+        why = stdin_payload["why"]
+        better = stdin_payload["better"]
+        missing = stdin_payload["missing"]
+        note = stdin_payload["note"]
+    elif not inline_feedback_present and not sys.stdin.isatty():
+        stdin_payload = _parse_feedback_stdin_payload(
+            _read_nonempty_stdin(
+                empty_message="stdin was piped but empty; provide a JSON feedback payload or inline flags."
+            )
+        )
+        memory = list(stdin_payload["memory"])
+        overall = stdin_payload["overall"]
+        why = stdin_payload["why"]
+        better = stdin_payload["better"]
+        missing = stdin_payload["missing"]
+        note = stdin_payload["note"]
+    try:
+        assignments = parse_feedback_assignments(memory)
+        payload = record_retrieval_feedback(
+            project.root,
+            event_id=event_id,
+            overall=overall,
+            memory_feedback=assignments,
+            why=why,
+            better=better,
+            missing=missing,
+            note=note,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if as_json:
+        _emit(payload, True)
+        return
+
+    typer.echo(f"Recorded retrieval feedback for {payload['event_id']}.")
+    if payload.get("overall"):
+        typer.echo(f"Overall: {payload['overall']}")
+    if payload.get("why"):
+        typer.echo(f"Why: {payload['why']}")
+    if payload.get("better"):
+        typer.echo(f"Better: {payload['better']}")
+    items = payload.get("memory_feedback")
+    if isinstance(items, list) and items:
+        typer.echo("Per-memory feedback:")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            typer.echo(
+                f"  {item.get('alias')} ({item.get('memory_id')}): {item.get('label')}"
+            )
+    if payload.get("missing"):
+        typer.echo(f"Missing: {payload['missing']}")
+    if payload.get("note"):
+        typer.echo(f"Note: {payload['note']}")
 
 
 @app.command(
@@ -1702,6 +2579,140 @@ def import_repo_command(
 
 
 @app.command(
+    name="migrate-memory-md",
+    help=(
+        "Import curated bullet notes from a legacy `MEMORY.md` file into the current project store. "
+        "This skips rules/preamble sections and focuses on durable notes plus point-in-time notes."
+    ),
+)
+def migrate_memory_md_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the initialized project store.",
+        resolve_path=True,
+    ),
+    path: Path | None = typer.Option(
+        None,
+        "--path",
+        help="Legacy MEMORY.md file to import. Defaults to <project-root>/MEMORY.md.",
+        resolve_path=True,
+    ),
+    subsystem: str | None = typer.Option(
+        None,
+        "--subsystem",
+        help="Metadata subsystem for imported memories. Defaults to the project root folder name.",
+    ),
+    workstream: str | None = typer.Option(
+        None,
+        "--workstream",
+        help="Override the workstream metadata for every imported memory.",
+    ),
+    environment: str | None = typer.Option(
+        None,
+        "--environment",
+        help="Override the environment metadata for every imported memory.",
+    ),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="Override the kind metadata for every imported memory.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview what would be imported without writing any memories.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    try:
+        project = load_project(cwd, exact=is_project_root(cwd))
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    register_project_root(project.root)
+    source_path = (path or (project.root / "MEMORY.md")).resolve()
+    if not source_path.exists():
+        raise typer.BadParameter(f"Legacy memory file does not exist: {source_path}")
+
+    entries = parse_legacy_memory_markdown(source_path)
+    resolved_subsystem = subsystem or project.root.name
+    preview = [
+        {
+            "line_number": entry.line_number,
+            "section_path": list(entry.section_path),
+            "text": entry.text,
+            "metadata": entry_to_metadata(
+                entry,
+                default_subsystem=resolved_subsystem,
+                workstream_override=workstream,
+                environment_override=environment,
+                kind_override=kind,
+            ).to_dict(),
+        }
+        for entry in entries[:10]
+    ]
+
+    if dry_run:
+        payload = {
+            "project_root": str(project.root),
+            "source_path": str(source_path),
+            "discovered_entries": len(entries),
+            "preview": preview,
+        }
+        _emit(payload, as_json)
+        return
+
+    memory = _open_memory(project.root)
+    saved: list[dict[str, object]] = []
+    skipped_duplicates = 0
+    skipped_errors: list[dict[str, object]] = []
+    try:
+        existing_texts = {
+            " ".join(record.text.split()).casefold()
+            for record in memory.list_all()
+        }
+        for entry in entries:
+            normalized_text = " ".join(entry.text.split()).casefold()
+            if normalized_text in existing_texts:
+                skipped_duplicates += 1
+                continue
+            metadata = entry_to_metadata(
+                entry,
+                default_subsystem=resolved_subsystem,
+                workstream_override=workstream,
+                environment_override=environment,
+                kind_override=kind,
+            )
+            try:
+                result = memory.save(entry.text, metadata=metadata)
+            except ValueError as exc:
+                skipped_errors.append(
+                    {
+                        "line_number": entry.line_number,
+                        "text": entry.text,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            saved_item = result.saved[0].to_dict()
+            saved.append(saved_item)
+            existing_texts.add(normalized_text)
+    finally:
+        memory.close()
+
+    payload = {
+        "project_root": str(project.root),
+        "source_path": str(source_path),
+        "discovered_entries": len(entries),
+        "saved_count": len(saved),
+        "skipped_duplicates": skipped_duplicates,
+        "skipped_errors": skipped_errors,
+        "saved": saved,
+    }
+    _emit(payload, as_json)
+
+
+@app.command(
     name="reembed",
     help=(
         "Re-embed every memory in the current project store using the configured local embedding model. "
@@ -1893,6 +2904,53 @@ def doctor(
 
 
 @app.command(
+    name="refresh-integrations",
+    help=(
+        "Rewrite Agent Memory hooks/instructions for the current project family. "
+        "Use --all-known to refresh every registered project family on this machine."
+    ),
+)
+def refresh_integrations_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    all_known: bool = typer.Option(
+        False,
+        "--all-known",
+        help="Refresh every registered Agent Memory project family, not just the current cwd project.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    payload = _refresh_integrations_payload(cwd=cwd, all_known=all_known)
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    typer.echo(f"Registry: {payload['registry_path']}")
+    refreshed = payload["refreshed_projects"]
+    assert isinstance(refreshed, list)
+    if not refreshed:
+        typer.echo("No registered Agent Memory projects were refreshed.")
+    for project_payload in refreshed:
+        if not isinstance(project_payload, dict):
+            continue
+        typer.echo(f"Project root: {project_payload.get('project_root')}")
+        roots = project_payload.get("refreshed_roots")
+        if isinstance(roots, list) and roots:
+            typer.echo("  Refreshed roots:")
+            for root in roots:
+                typer.echo(f"  - {root}")
+        skipped = project_payload.get("skipped_missing_roots")
+        if isinstance(skipped, list) and skipped:
+            typer.echo("  Missing linked roots:")
+            for root in skipped:
+                typer.echo(f"  - {root}")
+
+
+@app.command(
     "smoke-test",
     help=(
         "Run a disposable end-to-end Codex smoke test that verifies uninstall/reinstall, "
@@ -2022,11 +3080,51 @@ def hook_log(
     ),
 )
 def upgrade_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Optional project directory. If it resolves to an Agent Memory project, upgrade also refreshes that project family.",
+        resolve_path=True,
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
     from agent_memory.upgrade import perform_upgrade
 
     result = perform_upgrade()
+    refresh_payload: dict[str, object] | None = None
+    if result.get("status") == "upgraded":
+        binary_path = result.get("binary_path")
+        if isinstance(binary_path, str) and binary_path:
+            try:
+                refresh_run = subprocess.run(
+                    [
+                        binary_path,
+                        "refresh-integrations",
+                        "--all-known",
+                        "--cwd",
+                        str(cwd),
+                        "--json",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if refresh_run.returncode == 0 and refresh_run.stdout.strip():
+                    refresh_payload = json.loads(refresh_run.stdout)
+                else:
+                    refresh_payload = {
+                        "error": refresh_run.stderr.strip() or refresh_run.stdout.strip() or "refresh-integrations failed after upgrade",
+                    }
+            except (OSError, json.JSONDecodeError) as exc:
+                refresh_payload = {"error": str(exc)}
+        else:
+            refresh_payload = _refresh_integrations_payload(cwd=cwd, all_known=True)
+    elif result.get("status") == "up-to-date":
+        refresh_payload = _refresh_integrations_payload(cwd=cwd, all_known=True)
+
+    if refresh_payload is not None:
+        result["refresh"] = refresh_payload
+
     if as_json:
         _emit(result, True)
         return
@@ -2035,9 +3133,13 @@ def upgrade_command(
     if status == "upgraded":
         typer.echo(f"OK: {details}")
         typer.echo(f"  binary: {result.get('binary_path')}")
+        if refresh_payload is not None:
+            typer.echo("  integrations: refreshed registered project families")
         return
     if status == "up-to-date":
         typer.echo(details)
+        if refresh_payload is not None:
+            typer.echo("Refreshed registered project families.")
         return
     typer.echo(details, err=True)
     raise typer.Exit(code=1)

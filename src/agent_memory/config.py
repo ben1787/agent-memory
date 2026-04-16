@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 
@@ -9,6 +9,7 @@ APP_DIR_NAME = ".agent-memory"
 CONFIG_FILENAME = "config.json"
 DB_FILENAME = "memory.kuzu"
 INSTRUCTIONS_FILENAME = "instructions.md"
+LINKED_ROOTS_FILENAME = "linked-roots.json"
 
 
 class ConfigError(RuntimeError):
@@ -17,6 +18,10 @@ class ConfigError(RuntimeError):
 
 def _config_path(root: Path) -> Path:
     return root / APP_DIR_NAME / CONFIG_FILENAME
+
+
+def _linked_roots_path(root: Path) -> Path:
+    return root / APP_DIR_NAME / LINKED_ROOTS_FILENAME
 
 
 CURRENT_CONFIG_VERSION = 7
@@ -120,7 +125,13 @@ class MemoryConfig:
                 data["integration_version"] = None
             data["version"] = CURRENT_CONFIG_VERSION
 
-        return cls(**data)
+        allowed_fields = {field.name for field in fields(cls)}
+        filtered = {
+            key: value
+            for key, value in data.items()
+            if key in allowed_fields
+        }
+        return cls(**filtered)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -144,9 +155,11 @@ This project uses Agent Memory for project-scoped long-term memory.
 Rules:
 - Treat this memory store as specific to the current project root.
 - If there is any ambiguity about which project root is active, ask the user instead of guessing.
-- Strong matches from the current user prompt may be recalled automatically into context before the model call.
+- Strong matches from the current user prompt may be recalled automatically into context before the model call. The current auto-recall floor is a parent score of 0.7.
 - If prior project knowledge might help and the automatic recall is missing or incomplete, consider calling `recall_memories` with a concrete query tied to the current task.
-- During work, decide whether there are 0-3 durable memories worth saving with `save_memory`.
+- After finishing the work for the turn, decide whether there are 0-3 durable memories worth saving with `save_memory`.
+- One strong operational fact is enough: a file/module location, hook or threshold rule, install/update gotcha, runtime quirk, or explicit user correction.
+- When saving, pass explicit metadata arguments: `title`, `kind`, `subsystem`, `workstream`, and `environment`. Keep the memory body text plain.
 - If the MCP tools are unavailable in the current client, fall back to `agent-memory recall` and `agent-memory save` in the current project root.
 - Prefer stable facts, decisions, file locations, constraints, preferences, and discovered relationships.
 - Avoid saving noise, repeated wording, or giant raw dumps when a shorter memory will do.
@@ -156,7 +169,9 @@ Suggested workflow:
 1. Check any automatically injected Agent Memory context first.
 2. If prior project knowledge might help and the injected context is missing or incomplete, call `agent-memory recall "<task-specific query>"`.
 3. Do the work.
-4. If the work produced durable project knowledge, save 0-3 concise memories with `agent-memory save`.
+4. Before the final answer, if the work produced durable project knowledge, save 0-3 concise memories with explicit metadata fields.
+5. Save it if it would save future code inspection, prevent a likely wrong assumption, or narrow the search path.
+6. Reuse existing metadata spellings when they fit, and only invent a new value when nothing existing matches.
 
 For MCP clients, use the project root explicitly so reads and writes stay scoped correctly.
 """
@@ -204,10 +219,13 @@ def load_project(start: Path | None = None, exact: bool = False) -> ProjectConte
     if not config_path.exists():
         raise ConfigError(f"Missing config file at {config_path}")
     raw_config = json.loads(config_path.read_text(encoding='utf-8'))
+    legacy_linked_roots = raw_config.pop("linked_project_roots", None)
     config = MemoryConfig.from_dict(raw_config)
     normalized = config.to_dict()
     if normalized != raw_config:
         config_path.write_text(json.dumps(normalized, indent=2) + "\n", encoding='utf-8')
+    if legacy_linked_roots is not None:
+        write_linked_project_roots(root, legacy_linked_roots)
     return ProjectContext(
         root=root,
         app_dir=app_dir,
@@ -364,3 +382,46 @@ def init_project(
         instructions_path=instructions_path,
         config=resolved_config,
     )
+
+
+def _normalize_linked_root_strings(root: Path, roots: list[object]) -> list[str]:
+    normalized: dict[str, str] = {}
+    for item in roots:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        try:
+            resolved = str(Path(item).expanduser().resolve())
+        except OSError:
+            resolved = str((root / item).expanduser())
+        normalized[resolved] = resolved
+    return [normalized[key] for key in sorted(normalized)]
+
+
+def load_linked_project_roots(root: Path) -> list[str]:
+    path = _linked_roots_path(root.resolve())
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    items = payload.get("linked_project_roots") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return []
+    return _normalize_linked_root_strings(root.resolve(), items)
+
+
+def write_linked_project_roots(root: Path, roots: list[object]) -> list[str]:
+    resolved_root = root.resolve()
+    normalized = _normalize_linked_root_strings(resolved_root, roots)
+    path = _linked_roots_path(resolved_root)
+    if not normalized:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return []
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"linked_project_roots": normalized}
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return normalized

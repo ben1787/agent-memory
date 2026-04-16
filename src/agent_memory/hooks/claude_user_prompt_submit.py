@@ -15,10 +15,12 @@ from agent_memory.hooks.common import (
     read_hook_input,
     render_auto_recall_block,
     render_guidance_context,
+    render_save_nudge_block,
     sync_prompt_artifacts,
     summarize_hook_payload,
     truncate_words,
 )
+from agent_memory.retrieval_feedback import record_retrieval_event
 
 DEFAULT_CONTEXT_INTERVAL = 10
 
@@ -83,15 +85,32 @@ def main() -> None:
             )
         sections: list[str] = []
         recalled_memories, recall_metadata = auto_recall_matches(project_root, prompt)
+        feedback_event_id = None
+        if recalled_memories:
+            feedback_event_id = record_retrieval_event(
+                project_root,
+                query=prompt,
+                matches=recalled_memories,
+                hook_payload=hook_summary,
+            )
         if inject_guidance:
             sections.append(
                 render_guidance_context(
+                    project_root,
                     recalled_memories,
                     consolidation_instruction=pending_consolidation_instruction(project_root),
+                    feedback_event_id=feedback_event_id,
                 )
             )
-        elif recalled_memories:
-            sections.append(render_auto_recall_block(recalled_memories))
+        else:
+            if recalled_memories:
+                sections.append(
+                    render_auto_recall_block(
+                        recalled_memories,
+                        feedback_event_id=feedback_event_id,
+                    )
+                )
+            sections.append(render_save_nudge_block(project_root))
 
         if not sections:
             _emit_noop()
@@ -105,7 +124,9 @@ def main() -> None:
             payload={
                 "inject_guidance": inject_guidance,
                 "inject_auto_recall": recalled_memories is not None,
+                "inject_save_nudge": not inject_guidance,
                 "auto_recall": recall_metadata,
+                "feedback_event_id": feedback_event_id,
                 "context_preview": truncate_words(additional_context, 80),
             },
         )

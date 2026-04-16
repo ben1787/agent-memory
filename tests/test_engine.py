@@ -8,6 +8,8 @@ import pytest
 from agent_memory.config import MemoryConfig, init_project, load_project
 from agent_memory.embeddings import FastembedCachePruneResult
 from agent_memory.engine import AgentMemory, open_memory_with_retry, reembed_project
+from agent_memory.metadata_backfill import derive_metadata_from_text
+from agent_memory.models import MemoryMetadata
 from agent_memory.query_log import QUERY_LOG_FILENAME
 
 
@@ -80,6 +82,47 @@ def test_recall_cosine_rejects_empty_query_and_bad_limit(tmp_path: Path) -> None
             memory.recall_cosine("graph", limit=0)
     finally:
         memory.close()
+
+
+def test_save_persists_explicit_metadata_fields(tmp_path: Path) -> None:
+    memory = make_memory(tmp_path)
+    try:
+        result = memory.save(
+            "Billing webhook handler lives in services/billing/webhooks.py.\n"
+            "This saves a repo search when debugging Stripe events.",
+            metadata=MemoryMetadata(
+                title="Billing webhook handler",
+                kind="operational",
+                subsystem="billing",
+                workstream="webhooks",
+                environment="prod",
+            )
+        )
+        record = memory.get(result.saved[0].memory_id)
+    finally:
+        memory.close()
+
+    assert record is not None
+    assert record.text == (
+        "Billing webhook handler lives in services/billing/webhooks.py.\n"
+        "This saves a repo search when debugging Stripe events."
+    )
+    assert record.metadata.title == "Billing webhook handler"
+    assert record.metadata.kind == "operational"
+    assert record.metadata.subsystem == "billing"
+    assert record.metadata.workstream == "webhooks"
+    assert record.metadata.environment == "prod"
+
+
+def test_derive_metadata_from_text_classifies_common_patterns() -> None:
+    metadata = derive_metadata_from_text(
+        "User preference (2026-04-07): when asked for a recommendation, give the best technical solution regardless of implementation effort."
+    )
+
+    assert metadata.title.startswith("when asked for a recommendation")
+    assert metadata.kind == "preference"
+    assert metadata.workstream == "general"
+    assert metadata.environment == "unknown"
 
 
 def test_recall_to_dict_returns_query_rooted_nodes(tmp_path: Path) -> None:
@@ -371,6 +414,7 @@ def test_save_rejects_overlong_memory(tmp_path: Path) -> None:
             memory.save(text)
         except ValueError as exc:
             assert "too long" in str(exc)
+            assert "stdin mode" in str(exc)
         else:
             raise AssertionError("Expected save() to reject an overlong memory.")
     finally:

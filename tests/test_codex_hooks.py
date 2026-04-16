@@ -26,7 +26,7 @@ def test_codex_user_prompt_submit_returns_hook_specific_context(tmp_path: Path) 
         "hook_event_name": "UserPromptSubmit",
         "cwd": str(tmp_path),
         "turn_id": "turn-1",
-        "prompt": "where is the billing webhook handler",
+        "prompt": "billing webhook handler",
     }
     env = os.environ | {"AGENT_MEMORY_PROJECT_ROOT": str(tmp_path)}
     result = subprocess.run(
@@ -46,8 +46,20 @@ def test_codex_user_prompt_submit_returns_hook_specific_context(tmp_path: Path) 
     assert context.index("Reading memories:") < context.index("Storing memories:")
     assert "agent-memory recall" in context
     assert "agent-memory save" in context
+    assert "One strong operational fact is enough" in context
+    assert "--title" in context
+    assert "--kind" in context
+    assert "--subsystem" in context
+    assert "--workstream" in context
+    assert "--environment" in context
+    assert "Keep the body itself to 1-3 concise sentences" in context
     assert "Here is some context from Agent Memory that might be related:" in context
     assert "Billing webhook handler lives in services/billing/webhooks.py." in context
+    assert "[A] mem_" in context
+    assert "agent-memory feedback evt_" in context
+    assert "--stdin" in context
+    assert "--why \"<why the recalled set was or was not useful>\"" in context
+    assert "--better \"<what would have made the recalled set better>\"" in context
     assert "If you need more, call `agent-memory recall \"<more specific query>\"`." in context
     assert "save_memory" not in context
     assert "recall_memories" not in context
@@ -57,6 +69,7 @@ def test_codex_user_prompt_submit_returns_hook_specific_context(tmp_path: Path) 
     assert entries[0]["payload"]["turn_id"] == "turn-1"
     assert entries[1]["action"] == "inject_context"
     assert entries[1]["payload"]["turn_id"] == "turn-1"
+    assert str(entries[1]["payload"]["feedback_event_id"]).startswith("evt_")
 
 
 def test_codex_user_prompt_submit_injects_consolidation_instruction_when_due(tmp_path: Path) -> None:
@@ -102,12 +115,24 @@ def test_codex_user_prompt_submit_skips_non_interval_turns(tmp_path: Path) -> No
         check=True,
     )
 
-    assert json.loads(result.stdout) == {}
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "Agent Memory\n" not in context
+    assert "Memory save reminder:" in context
+    assert "One strong operational fact is enough" in context
+    assert "--title" in context
+    assert "--kind" in context
+    assert "--subsystem" in context
+    assert "--workstream" in context
+    assert "--environment" in context
 
     entries = hook_log_entries(tmp_path)
     assert entries[0]["action"] == "start"
     assert entries[1]["action"] == "skip_context"
     assert entries[1]["payload"]["reason"] == "non_interval_turn"
+    assert entries[2]["action"] == "inject_context"
+    assert entries[2]["payload"]["inject_guidance"] is False
+    assert entries[2]["payload"]["inject_auto_recall"] is False
+    assert entries[2]["payload"]["inject_save_nudge"] is True
 
 
 def test_codex_user_prompt_submit_injects_auto_recall_on_non_interval_turn(tmp_path: Path) -> None:
@@ -120,7 +145,7 @@ def test_codex_user_prompt_submit_injects_auto_recall_on_non_interval_turn(tmp_p
         "hook_event_name": "UserPromptSubmit",
         "cwd": str(tmp_path),
         "turn_id": "turn-2",
-        "prompt": "where is the billing webhook handler",
+        "prompt": "billing webhook handler",
     }
     env = os.environ | {"AGENT_MEMORY_PROJECT_ROOT": str(tmp_path)}
     result = subprocess.run(
@@ -136,6 +161,17 @@ def test_codex_user_prompt_submit_injects_auto_recall_on_non_interval_turn(tmp_p
     assert "Agent Memory\n" not in context
     assert "Here is some context from Agent Memory that might be related:" in context
     assert "Billing webhook handler lives in services/billing/webhooks.py." in context
+    assert "Memory save reminder:" in context
+    assert "--title" in context
+    assert "--kind" in context
+    assert "--subsystem" in context
+    assert "--workstream" in context
+    assert "--environment" in context
+    assert "[A] mem_" in context
+    assert "agent-memory feedback evt_" in context
+    assert "--stdin" in context
+    assert "--why \"<why the recalled set was or was not useful>\"" in context
+    assert "--better \"<what would have made the recalled set better>\"" in context
     assert 'If you need more, call `agent-memory recall "<more specific query>"`.' in context
 
     entries = hook_log_entries(tmp_path)
@@ -144,6 +180,8 @@ def test_codex_user_prompt_submit_injects_auto_recall_on_non_interval_turn(tmp_p
     assert entries[2]["action"] == "inject_context"
     assert entries[2]["payload"]["inject_guidance"] is False
     assert entries[2]["payload"]["inject_auto_recall"] is True
+    assert entries[2]["payload"]["inject_save_nudge"] is True
+    assert str(entries[2]["payload"]["feedback_event_id"]).startswith("evt_")
 
 
 def test_codex_user_prompt_submit_drops_auto_recall_below_threshold(tmp_path: Path) -> None:
@@ -168,7 +206,10 @@ def test_codex_user_prompt_submit_drops_auto_recall_below_threshold(tmp_path: Pa
         check=True,
     )
 
-    assert json.loads(result.stdout) == {}
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "Here is some context from Agent Memory that might be related:" not in context
+    assert "Memory save reminder:" in context
+    assert "--title" in context
 
 
 def test_codex_user_prompt_submit_refreshes_stale_prompt_artifacts(tmp_path: Path) -> None:

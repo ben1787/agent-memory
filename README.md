@@ -11,7 +11,7 @@ It is designed to give agents a **persistent project memory** that survives acro
 - **Local-first**: data lives in `.agent-memory/memory.kuzu` inside your project
 - **Project-scoped**: each initialized folder gets its own memory store, with at most one store along any ancestor chain
 - **Graph-native**: memories are nodes; `SIMILAR` and `NEXT` edges are persisted in a [Kuzu](https://kuzudb.com/) database
-- **CLI-first by default**: agents access memory through `agent-memory recall` / `agent-memory save` via their shell tool, with prompt hooks able to inject strong prompt-matched recall automatically and no MCP wiring required
+- **CLI-first by default**: agents access memory through `agent-memory recall` / `agent-memory save` via their shell tool, with prompt hooks able to inject strong prompt-matched recall automatically at a parent-score floor of `0.7`, and no MCP wiring required
 - **Recoverable**: every save / edit / delete is logged so `agent-memory undo` can walk back mistakes
 - **Single binary**: ships as a self-contained executable, no Python on the user's machine required
 
@@ -73,18 +73,20 @@ cd /path/to/your/repo
 agent-memory init
 ```
 
-That creates `.agent-memory/` for the store, installs `UserPromptSubmit` hooks for both Claude Code and Codex (if you use those agents) so they can inject strong prompt-matched memory before the model call plus periodic memory guidance, and injects an `Agent Memory` instructions block into `CLAUDE.md` / `AGENTS.md` if those files exist.
+That creates `.agent-memory/` for the store, installs `UserPromptSubmit` hooks for both Claude Code and Codex (if you use those agents) so they can inject strong prompt-matched memory before the model call at the current `0.7` parent-score floor plus periodic memory guidance, and injects an `Agent Memory` instructions block into `CLAUDE.md` / `AGENTS.md` if those files exist.
 
 Save a memory:
 
 ```bash
-agent-memory save "The billing webhook handler lives in services/billing/webhooks.py."
+cat <<'EOF' | agent-memory save
+The billing webhook handler lives in services/billing/webhooks.py.
+EOF
 ```
 
-For multi-line memories or content with shell-hostile characters, use `--stdin`:
+For agents and anything with quotes, backticks, dollar signs, or newlines, prefer piped stdin so the shell cannot rewrite the text before `agent-memory` sees it. For a very short shell-safe one-liner, quoted positional args are still fine:
 
 ```bash
-echo "$MULTI_LINE_MEMORY" | agent-memory save --stdin
+agent-memory save "The billing webhook handler lives in services/billing/webhooks.py."
 ```
 
 Recall memories:
@@ -103,7 +105,9 @@ Mistakes happen. The recovery flow:
 agent-memory list --recent 10              # most recent memories with their ids
 agent-memory show <memory_id>              # full text + metadata of one memory
 agent-memory edit <memory_id> "<new text>" # one-shot replacement (re-embeds)
-agent-memory edit <memory_id> --stdin      # multi-line / shell-hostile content
+cat <<'EOF' | agent-memory edit <memory_id> # multi-line / shell-hostile content
+<replacement text>
+EOF
 agent-memory edit <memory_id>              # opens $EDITOR with current text
 agent-memory delete <memory_id> --yes      # remove a memory entirely
 agent-memory undo                          # reverse the most recent save / edit / delete
@@ -165,7 +169,7 @@ The hook command is portable across machines:
 AGENT_MEMORY_PROJECT_ROOT=/abs/path/to/repo agent-memory _hook claude-user-prompt-submit
 ```
 
-It dispatches to the binary on `PATH`, so the same hook config works on any machine with `agent-memory` installed (regardless of install method). On every prompt, the hook can recall against the raw user prompt and inject only strong matches; on the configured `1 + X` cadence, it also injects the broader memory/save guidance.
+It dispatches to the binary on `PATH`, so the same hook config works on any machine with `agent-memory` installed (regardless of install method). On every prompt, the hook can recall against the raw user prompt and inject only strong matches at the current `0.7` parent-score floor; on the configured `1 + X` cadence, it also injects the broader memory/save guidance.
 
 For redundancy, `init` also injects an `Agent Memory` section into `CLAUDE.md` and `AGENTS.md` if those files already exist. The block tells the agent how to use the CLI even if the prompt-submit hook ever breaks or gets disabled.
 

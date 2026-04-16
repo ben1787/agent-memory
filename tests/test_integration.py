@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_memory.config import init_project, load_project, write_linked_project_roots
 from agent_memory.integration import (
     INSTRUCTIONS_BEGIN_MARKER,
     INSTRUCTIONS_END_MARKER,
@@ -14,6 +15,7 @@ from agent_memory.integration import (
     install_codex_project_trust,
     install_mcp_server,
     install_memory_instructions,
+    refresh_project_integration,
     remove_local_git_excludes,
     suggest_project_root,
     uninstall_codex_feature_flag,
@@ -524,3 +526,55 @@ def test_uninstall_memory_instructions_no_op_when_block_absent(tmp_path: Path) -
     statuses = {r.path.name: r.status for r in results}
     assert statuses["CLAUDE.md"] == "unchanged"
     assert claude_md.read_text(encoding='utf-8') == "# Project\n\nfoo\n"
+
+
+def test_install_codex_hooks_can_target_shared_parent_store(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+
+    result = install_codex_hooks(child, memory_project_root=parent)
+
+    assert result.status == "created"
+    payload = json.loads((child / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    command = payload["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert str(parent.resolve()) in command
+    assert str(child.resolve()) not in command
+
+
+def test_install_memory_instructions_describes_shared_store(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    agents_md = child / "AGENTS.md"
+    agents_md.write_text("# Child Repo\n", encoding="utf-8")
+
+    results = install_memory_instructions(child, memory_project_root=parent)
+
+    assert {result.path.name: result.status for result in results}["AGENTS.md"] == "created"
+    text = agents_md.read_text(encoding="utf-8")
+    assert str((parent / ".agent-memory").resolve()) in text
+    assert "agent-memory link-root" in text
+
+
+def test_refresh_project_integration_refreshes_linked_roots(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    init_project(parent)
+    project = load_project(parent, exact=True)
+    project.config.integration_version = "v0.0.1"
+    project.config_path.write_text(json.dumps(project.config.to_dict(), indent=2) + "\n", encoding="utf-8")
+    write_linked_project_roots(parent, [str(child.resolve())])
+
+    install_codex_hooks(child, memory_project_root=child)
+    (child / "AGENTS.md").write_text("# Child Repo\n", encoding="utf-8")
+    install_memory_instructions(child, memory_project_root=child)
+
+    payload = refresh_project_integration(project, current_version="v0.2.10", force=True)
+
+    command = json.loads((child / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert str(parent.resolve()) in command
+    assert str(child.resolve()) not in command
+    assert str((parent / ".agent-memory").resolve()) in (child / "AGENTS.md").read_text(encoding="utf-8")
+    assert payload["refreshed_roots"] == [str(child.resolve())]

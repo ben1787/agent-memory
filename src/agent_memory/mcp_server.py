@@ -7,9 +7,14 @@ from mcp.server.fastmcp import FastMCP
 
 from agent_memory.config import ConfigError, MemoryConfig, load_project
 from agent_memory.engine import AgentMemory, open_memory_with_retry
+from agent_memory.models import MemoryMetadata
 from agent_memory.hooks.common import (
     consolidation_status,
     mark_consolidation_completed,
+)
+from agent_memory.retrieval_feedback import (
+    parse_feedback_assignments,
+    record_retrieval_feedback,
 )
 
 
@@ -46,11 +51,55 @@ def build_server(default_project_root: Path | None = None) -> FastMCP:
         return open_memory_with_retry(root, exact=True, read_only=read_only)
 
     @server.tool()
-    def save_memory(text: str | list[str], project_root: str | None = None) -> dict[str, object]:
-        """Persist one or more memory strings and connect them to similar memories."""
+    def save_memory(
+        text: str,
+        title: str,
+        kind: str,
+        subsystem: str,
+        workstream: str,
+        environment: str,
+        project_root: str | None = None,
+    ) -> dict[str, object]:
+        """Persist one memory body plus explicit metadata fields."""
         memory = _open(project_root)
         try:
-            return memory.save(text).to_dict()
+            metadata = MemoryMetadata(
+                title=title,
+                kind=kind,
+                subsystem=subsystem,
+                workstream=workstream,
+                environment=environment,
+            )
+            return memory.save(text, metadata=metadata).to_dict()
+        finally:
+            memory.close()
+
+    @server.tool()
+    def edit_memory(
+        memory_id: str,
+        text: str | None = None,
+        title: str | None = None,
+        kind: str | None = None,
+        subsystem: str | None = None,
+        workstream: str | None = None,
+        environment: str | None = None,
+        project_root: str | None = None,
+    ) -> dict[str, object]:
+        """Update a memory body and/or metadata fields. Omitted fields retain their current values."""
+        memory = _open(project_root)
+        try:
+            existing = memory.get(memory_id)
+            if existing is None:
+                raise KeyError(f"Memory {memory_id!r} does not exist.")
+            metadata = MemoryMetadata(
+                title=title,
+                kind=kind,
+                subsystem=subsystem,
+                workstream=workstream,
+                environment=environment,
+            )
+            resolved_text = text if text is not None else existing.text
+            return memory.edit(memory_id, resolved_text, metadata=metadata).to_dict()
         finally:
             memory.close()
 
@@ -84,6 +133,32 @@ def build_server(default_project_root: Path | None = None) -> FastMCP:
             return memory.recall(query, limit=limit).to_dict()
         finally:
             memory.close()
+
+    @server.tool()
+    def memory_feedback(
+        event_id: str,
+        memory: list[str] | None = None,
+        overall: str | None = None,
+        why: str | None = None,
+        better: str | None = None,
+        missing: str | None = None,
+        note: str | None = None,
+        project_root: str | None = None,
+    ) -> dict[str, object]:
+        """Record structured feedback for one prompt-time memory injection event."""
+        root = _resolve_project_root(project_root) or project_hint
+        if root is None:
+            raise ConfigError("A project root is required to record retrieval feedback.")
+        return record_retrieval_feedback(
+            root,
+            event_id=event_id,
+            overall=overall,
+            memory_feedback=parse_feedback_assignments(memory or []),
+            why=why,
+            better=better,
+            missing=missing,
+            note=note,
+        )
 
     @server.tool()
     def consolidate_memories(project_root: str | None = None) -> dict[str, object]:
