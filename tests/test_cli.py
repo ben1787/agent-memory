@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,14 @@ from agent_memory.engine import open_memory_with_retry
 from agent_memory.integration import IntegrationResult
 from agent_memory.models import MemoryMetadata
 from agent_memory.retrieval_feedback import record_retrieval_event
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _normalized_cli_output(result) -> str:  # noqa: ANN001 - test helper
+    parts = [result.stdout or "", result.stderr or "", getattr(result, "output", "") or ""]
+    return ANSI_ESCAPE_RE.sub("", "".join(parts))
 
 
 def test_codex_feature_state_parses_false(monkeypatch, tmp_path: Path) -> None:
@@ -501,8 +510,9 @@ def test_save_command_requires_metadata_flags(tmp_path: Path) -> None:
     result = runner.invoke(app, ["save", "--cwd", str(tmp_path), "body only"])
 
     assert result.exit_code != 0
-    combined = result.stdout + (result.stderr or "")
-    assert "--title" in combined or "--kind" in combined
+    combined = _normalized_cli_output(result)
+    assert "Missing option" in combined
+    assert "--title" in combined
 
 
 def test_import_repo_command_bootstraps_project_corpus(tmp_path: Path) -> None:
@@ -1203,7 +1213,7 @@ def test_feedback_command_stdin_rejects_combined_inline_flags(tmp_path: Path) ->
     )
 
     assert result.exit_code != 0
-    combined_output = (result.stdout or "") + (result.stderr or "")
+    combined_output = _normalized_cli_output(result)
     assert "--stdin cannot be combined" in combined_output
 
 
