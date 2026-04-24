@@ -25,7 +25,7 @@ STORING_SECTION = """Storing memories:
   Prefer: workflow rules, architecture map, search shortcuts, file/module locations that were hard to find, hook/threshold behavior, install/update gotchas, runtime quirks, external system behavior, validation/release constraints, recurring customer/project facts.
   Do not save: temp branch/PR/test state, logs/transcripts, generic advice, grep-easy facts, speculation, soon-changing details.
   Save with explicit metadata fields: `--title`, `--kind`, `--subsystem`, `--workstream`, `--environment`.
-  Keep the body itself to 1-3 concise sentences; do not repeat the metadata inside the body text.
+  Write the body as a self-contained note between 30 and 250 words (round up to at least 30). Every memory must cover three things: (1) *what* the fact is, (2) *why* you are saving it (what wrong assumption, bug, or re-investigation it prevents), and (3) *when* this will be valuable (the future task, question, or code path where it should surface). Do not repeat the metadata inside the body text.
   Reuse existing metadata spellings when they already fit; otherwise create a new value.
   Orthogonality rules:
   - `subsystem` = stable reusable component, service, package, domain area, or repo area.
@@ -41,7 +41,7 @@ SAVE_NUDGE_LINES = (
     "  - After you finish the work for this turn, save 1-3 durable repo-specific facts if you resolved a non-obvious operational detail or explicit user correction.",
     "  - One strong operational fact is enough: file/module locations, hook or threshold behavior, install/update gotchas, runtime quirks, or why something behaved that way.",
     "  - Save near the end with explicit metadata fields: `agent-memory save --title ... --kind ... --subsystem ... --workstream ... --environment ... --stdin`.",
-    "  - Keep the body text plain. Do not encode metadata in the body itself. Use `--stdin` for quotes/newlines.",
+    "  - Write the body as a self-contained note between 30 and 250 words, covering *what* the fact is, *why* you are saving it, and *when* it will be valuable on a future turn. Do not encode metadata in the body itself. Use `--stdin` for quotes/newlines.",
 )
 
 _DEFAULT_CONSOLIDATION_STATE: dict[str, Any] = {

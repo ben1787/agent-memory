@@ -54,7 +54,10 @@ def test_claude_user_prompt_submit_returns_additional_context(tmp_path: Path) ->
     assert "--subsystem" in context
     assert "--workstream" in context
     assert "--environment" in context
-    assert "Keep the body itself to 1-3 concise sentences" in context
+    assert "between 30 and 250 words" in context
+    assert "*what* the fact is" in context
+    assert "*why* you are saving it" in context
+    assert "*when* this will be valuable" in context
     assert "Here is some context from Agent Memory that might be related:" in context
     assert "Billing webhook handler lives in services/billing/webhooks.py." in context
     assert "[A] mem_" in context
