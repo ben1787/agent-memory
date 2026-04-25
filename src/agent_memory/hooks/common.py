@@ -18,30 +18,10 @@ AUTO_RECALL_LIMIT = 3
 AUTO_RECALL_MIN_QUERY_SIMILARITY = 0.7
 AUTO_RECALL_MAX_WORDS_PER_MEMORY = 48
 AUTO_RECALL_FALLBACK = 'If you need more, call `agent-memory recall "<more specific query>"`.'
-STORING_SECTION = """Storing memories:
-  Save only durable, repo-specific facts that will materially speed up future work or prevent likely mistakes.
-  After you finish the work for this turn, default to saving 1-3 memories when you resolved a non-obvious operational fact or explicit user correction.
-  One strong operational fact is enough; you do not need 2 separate reasons.
-  Prefer: workflow rules, architecture map, search shortcuts, file/module locations that were hard to find, hook/threshold behavior, install/update gotchas, runtime quirks, external system behavior, validation/release constraints, recurring customer/project facts.
-  Do not save: temp branch/PR/test state, logs/transcripts, generic advice, grep-easy facts, speculation, soon-changing details.
-  Save with explicit metadata fields: `--title`, `--kind`, `--subsystem`, `--workstream`, `--environment`.
-  Write the body as a self-contained note between 30 and 250 words (round up to at least 30). Every memory must cover three things: (1) *what* the fact is, (2) *why* you are saving it (what wrong assumption, bug, or re-investigation it prevents), and (3) *when* this will be valuable (the future task, question, or code path where it should surface). Do not repeat the metadata inside the body text.
-  Reuse existing metadata spellings when they already fit; otherwise create a new value.
-  Orthogonality rules:
-  - `subsystem` = stable reusable component, service, package, domain area, or repo area.
-  - Do not use file paths, endpoint paths, one-off bug names, or title paraphrases as `subsystem` unless that artifact is itself the stable boundary used by the repo.
-  - `workstream` = reusable capability, problem area, workflow, or topic within the subsystem.
-  - Do not restate the title, file path, or one-off incident summary as `workstream`.
-  - If a memory mentions both a stable component and a file path, put the stable component in `subsystem` and leave the file path in the body text.
-  Worthiness test: save it if it would save future code inspection, prevent a likely wrong assumption, or narrow the search path.
-  Before the final answer, if you resolved a concrete how/why/where question from code inspection or debugging, save it with `agent-memory save --title "<title>" --kind "<kind>" --subsystem "<subsystem>" --workstream "<workstream>" --environment "<environment>" --stdin`. Use `--stdin` for quotes/newlines.
-  If you saved something wrong: use `list --recent 5`, then `edit`/`delete`, or `undo`."""
+STORING_SECTION = """Storing: save anything worth remembering later. Each memory says *what* the fact is, *why* you saved it, and *when* it will be useful (30-250 words). Use `agent-memory save --title ... --kind ... --subsystem ... --workstream ... --environment ... --stdin`; reuse existing metadata spellings.
+Curate: fix unclear/wrong recalled memories with `agent-memory edit <id>`; delete obsolete ones with `agent-memory delete <id> --yes`."""
 SAVE_NUDGE_LINES = (
-    "Memory save reminder:",
-    "  - After you finish the work for this turn, save 1-3 durable repo-specific facts if you resolved a non-obvious operational detail or explicit user correction.",
-    "  - One strong operational fact is enough: file/module locations, hook or threshold behavior, install/update gotchas, runtime quirks, or why something behaved that way.",
-    "  - Save near the end with explicit metadata fields: `agent-memory save --title ... --kind ... --subsystem ... --workstream ... --environment ... --stdin`.",
-    "  - Write the body as a self-contained note between 30 and 250 words, covering *what* the fact is, *why* you are saving it, and *when* it will be valuable on a future turn. Do not encode metadata in the body itself. Use `--stdin` for quotes/newlines.",
+    "Memory: save what's worth remembering later (*what*/*why*/*when*, 30-250 words) via `agent-memory save ... --stdin`. Edit/delete recalled memories that are unclear, wrong, or obsolete.",
 )
 
 _DEFAULT_CONSOLIDATION_STATE: dict[str, Any] = {
@@ -340,22 +320,11 @@ def render_feedback_instruction(feedback_event_id: str | None) -> list[str]:
     if not feedback_event_id:
         return []
     return [
-        "If you actually used or evaluated these injected memories during the turn, record structured retrieval feedback near the end of the task:",
         (
-            f'`agent-memory feedback {feedback_event_id} --overall helpful|mixed|irrelevant '
-            '--why "<why the recalled set was or was not useful>" '
-            '--better "<what would have made the recalled set better>" '
-            '--memory A=helpful --memory B=partial --memory C=irrelevant '
-            '[--missing "<what should have surfaced>"]`'
+            f"If you used these, give feedback: `agent-memory feedback {feedback_event_id} "
+            '--overall helpful|mixed|irrelevant --memory A=helpful|partial|irrelevant|stale|wrong '
+            '--why "..." --better "..." [--missing "..."]`. Use `--stdin` (JSON) for quotes/newlines.'
         ),
-        "Include a short event-level assessment of the whole recalled set: whether it was useful, why or why not, and what would have made it better.",
-        (
-            f"For quotes, backticks, dollar signs, or newlines in feedback text, prefer "
-            f"`agent-memory feedback {feedback_event_id} --stdin` with a JSON object containing "
-            "`overall`, `why`, `better`, `missing`, `note`, and `memory`."
-        ),
-        "The labels after `--memory` apply to individual memories, not the whole recall block.",
-        "Use per-memory labels: helpful, partial, irrelevant, stale, wrong.",
     ]
 
 
@@ -418,7 +387,7 @@ def render_auto_recall_block(
     *,
     feedback_event_id: str | None,
 ) -> str:
-    lines = ["Here is some context from Agent Memory that might be related:"]
+    lines = ["Possibly related memories:"]
     for match in recalled_memories:
         lines.append(f"- [{match['alias']}] {match['memory_id']}: {_format_recalled_match(match)}")
     lines.append(AUTO_RECALL_FALLBACK)
@@ -433,23 +402,18 @@ def render_guidance_context(
     consolidation_instruction: str | None,
     feedback_event_id: str | None,
 ) -> str:
-    lines = [
-        "Agent Memory",
-        "",
-        "Reading memories:",
-    ]
+    lines = ["Agent Memory", ""]
     if recalled_memories:
-        lines.append("  - Here is some context from Agent Memory that might be related:")
+        lines.append("Possibly related memories:")
         for match in recalled_memories:
             lines.append(
-                f"    - [{match['alias']}] {match['memory_id']}: {_format_recalled_match(match)}"
+                f"  - [{match['alias']}] {match['memory_id']}: {_format_recalled_match(match)}"
             )
-        lines.append(f"  - {AUTO_RECALL_FALLBACK}")
+        lines.append(AUTO_RECALL_FALLBACK)
         for feedback_line in render_feedback_instruction(feedback_event_id):
-            lines.append(f"  - {feedback_line}")
+            lines.append(feedback_line)
     else:
-        lines.append("  - Related memory may be injected automatically from the current user prompt when there is a strong match.")
-        lines.append("  - If the injected context is missing or incomplete, call `agent-memory recall <task-shaped query>`.")
+        lines.append("Reading: call `agent-memory recall <query>` for related context.")
     lines.extend(["", *STORING_SECTION.splitlines()])
     lines.extend(["", *_render_metadata_registry_block(project_root)])
     if consolidation_instruction:

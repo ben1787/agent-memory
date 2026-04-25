@@ -43,26 +43,25 @@ def test_codex_user_prompt_submit_returns_hook_specific_context(tmp_path: Path) 
     assert hook_output["hookEventName"] == "UserPromptSubmit"
     context = hook_output["additionalContext"]
     assert "Agent Memory" in context
-    assert context.index("Reading memories:") < context.index("Storing memories:")
+    assert "Storing:" in context
     assert "agent-memory recall" in context
     assert "agent-memory save" in context
-    assert "One strong operational fact is enough" in context
     assert "--title" in context
     assert "--kind" in context
     assert "--subsystem" in context
     assert "--workstream" in context
     assert "--environment" in context
-    assert "between 30 and 250 words" in context
-    assert "*what* the fact is" in context
-    assert "*why* you are saving it" in context
-    assert "*when* this will be valuable" in context
-    assert "Here is some context from Agent Memory that might be related:" in context
+    assert "30-250 words" in context
+    assert "*what*" in context
+    assert "*why*" in context
+    assert "*when*" in context
+    assert "agent-memory edit" in context
+    assert "agent-memory delete" in context
+    assert "Possibly related memories:" in context
     assert "Billing webhook handler lives in services/billing/webhooks.py." in context
     assert "[A] mem_" in context
     assert "agent-memory feedback evt_" in context
     assert "--stdin" in context
-    assert "--why \"<why the recalled set was or was not useful>\"" in context
-    assert "--better \"<what would have made the recalled set better>\"" in context
     assert "If you need more, call `agent-memory recall \"<more specific query>\"`." in context
     assert "save_memory" not in context
     assert "recall_memories" not in context
@@ -97,7 +96,7 @@ def test_codex_user_prompt_submit_injects_consolidation_instruction_when_due(tmp
     context = output["hookSpecificOutput"]["additionalContext"]
     assert "Agent Memory daily consolidation is due." in context
     assert "Run the daily consolidation skill, ideally in a sub-agent" in context
-    assert context.index("Reading memories:") < context.index("Storing memories:")
+    assert "Storing:" in context
 
 
 def test_codex_user_prompt_submit_skips_non_interval_turns(tmp_path: Path) -> None:
@@ -120,13 +119,7 @@ def test_codex_user_prompt_submit_skips_non_interval_turns(tmp_path: Path) -> No
 
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Agent Memory\n" not in context
-    assert "Memory save reminder:" in context
-    assert "One strong operational fact is enough" in context
-    assert "--title" in context
-    assert "--kind" in context
-    assert "--subsystem" in context
-    assert "--workstream" in context
-    assert "--environment" in context
+    assert "Memory: save what's worth remembering later" in context
 
     entries = hook_log_entries(tmp_path)
     assert entries[0]["action"] == "start"
@@ -162,19 +155,12 @@ def test_codex_user_prompt_submit_injects_auto_recall_on_non_interval_turn(tmp_p
 
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Agent Memory\n" not in context
-    assert "Here is some context from Agent Memory that might be related:" in context
+    assert "Possibly related memories:" in context
     assert "Billing webhook handler lives in services/billing/webhooks.py." in context
-    assert "Memory save reminder:" in context
-    assert "--title" in context
-    assert "--kind" in context
-    assert "--subsystem" in context
-    assert "--workstream" in context
-    assert "--environment" in context
+    assert "Memory: save what's worth remembering later" in context
     assert "[A] mem_" in context
     assert "agent-memory feedback evt_" in context
     assert "--stdin" in context
-    assert "--why \"<why the recalled set was or was not useful>\"" in context
-    assert "--better \"<what would have made the recalled set better>\"" in context
     assert 'If you need more, call `agent-memory recall "<more specific query>"`.' in context
 
     entries = hook_log_entries(tmp_path)
@@ -210,9 +196,8 @@ def test_codex_user_prompt_submit_drops_auto_recall_below_threshold(tmp_path: Pa
     )
 
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert "Here is some context from Agent Memory that might be related:" not in context
-    assert "Memory save reminder:" in context
-    assert "--title" in context
+    assert "Possibly related memories:" not in context
+    assert "Memory: save what's worth remembering later" in context
 
 
 def test_codex_user_prompt_submit_refreshes_stale_prompt_artifacts(tmp_path: Path) -> None:
