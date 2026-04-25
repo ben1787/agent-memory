@@ -93,12 +93,23 @@ class HashEmbedder:
         return self.embed_text(text)
 
 
+def stable_fastembed_cache_dir() -> Path:
+    return Path.home() / ".cache" / "agent-memory" / "fastembed"
+
+
 class FastEmbedder:
-    def __init__(self, model_name: str, dimensions: int) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        dimensions: int,
+        cache_dir: str | Path | None = None,
+    ) -> None:
         from fastembed import TextEmbedding
 
         self.dimensions = dimensions
-        self._model = TextEmbedding(model_name=model_name)
+        resolved_cache = Path(cache_dir) if cache_dir else stable_fastembed_cache_dir()
+        resolved_cache.mkdir(parents=True, exist_ok=True)
+        self._model = TextEmbedding(model_name=model_name, cache_dir=str(resolved_cache))
 
     def _collect(self, embeddings) -> list[list[float]]:
         vectors = []
@@ -156,9 +167,11 @@ def embed_query(embedder: Embedder, text: str) -> list[float]:
 
 
 def fastembed_cache_dir(cache_dir: str | None = None) -> Path:
-    from fastembed.common.utils import define_cache_dir
+    if cache_dir:
+        from fastembed.common.utils import define_cache_dir
 
-    return define_cache_dir(cache_dir)
+        return define_cache_dir(cache_dir)
+    return stable_fastembed_cache_dir()
 
 
 def _supported_fastembed_hf_sources() -> dict[str, str]:
