@@ -1664,13 +1664,13 @@ def uninstall_all(
 def save(
     text: str | None = typer.Argument(
         None,
-        help="Memory body to persist. Omit when using --stdin.",
+        help="Memory body to persist. Omit when using --stdin or --batch.",
     ),
-    title: str = typer.Option(..., "--title", help="Short durable title for the memory."),
-    kind: str = typer.Option(..., "--kind", help="Memory kind, e.g. operational or preference."),
-    subsystem: str = typer.Option(..., "--subsystem", help="Primary subsystem this memory belongs to."),
-    workstream: str = typer.Option(..., "--workstream", help="Narrow workstream within the subsystem."),
-    environment: str = typer.Option(..., "--environment", help="Environment scope, e.g. local, dev, qa, prod."),
+    title: str | None = typer.Option(None, "--title", help="Short durable title for the memory."),
+    kind: str | None = typer.Option(None, "--kind", help="Memory kind, e.g. operational or preference."),
+    subsystem: str | None = typer.Option(None, "--subsystem", help="Primary subsystem this memory belongs to."),
+    workstream: str | None = typer.Option(None, "--workstream", help="Narrow workstream within the subsystem."),
+    environment: str | None = typer.Option(None, "--environment", help="Environment scope, e.g. local, dev, qa, prod."),
     cwd: Path = typer.Option(
         Path("."),
         "--cwd",
@@ -1685,8 +1685,39 @@ def save(
             "argument. Optional when stdin is already piped and no positional text is given."
         ),
     ),
+    batch: bool = typer.Option(
+        False,
+        "--batch",
+        help=(
+            "Read a JSON list of memory objects from stdin and save them in one engine session. "
+            "Each entry: {title, kind, subsystem, workstream, environment, text}. Always emits JSON."
+        ),
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
+    if batch:
+        if text is not None or from_stdin or any(
+            value is not None for value in (title, kind, subsystem, workstream, environment)
+        ):
+            raise typer.BadParameter(
+                "--batch reads its inputs from stdin; do not pass text, --stdin, or metadata flags."
+            )
+        _run_save_batch(cwd=cwd)
+        return
+
+    missing = [
+        flag
+        for flag, value in (
+            ("--title", title),
+            ("--kind", kind),
+            ("--subsystem", subsystem),
+            ("--workstream", workstream),
+            ("--environment", environment),
+        )
+        if value is None
+    ]
+    if missing:
+        raise typer.BadParameter("save requires explicit metadata: " + ", ".join(missing))
     if from_stdin and text is not None:
         raise typer.BadParameter("--stdin cannot be combined with a positional memory body.")
 
@@ -1743,6 +1774,143 @@ def save(
             f"  {neighbor['memory_id']}  similarity={neighbor['similarity']}"
         )
     typer.echo(f"Total memories: {payload['total_memories']}")
+
+
+def _read_batch_json_list(label: str) -> list:
+    """Read stdin and parse a JSON array. Used by --batch on save/edit/recall."""
+    raw = _read_nonempty_stdin(
+        empty_message=f"--batch expects a JSON array on stdin; got empty input ({label})."
+    )
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"--batch ({label}) received invalid JSON: {exc}") from exc
+    if not isinstance(items, list):
+        raise typer.BadParameter(f"--batch ({label}) must be a JSON array.")
+    return items
+
+
+def _coerce_optional_str(entry: dict, field: str, *, label: str, index: int) -> str | None:
+    value = entry.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise typer.BadParameter(
+            f"--batch ({label}) entry #{index} `{field}` must be a string when provided."
+        )
+    return value
+
+
+def _partial_metadata_from_entry(entry: dict, *, label: str, index: int) -> MemoryMetadata | None:
+    fields = {
+        field: _coerce_optional_str(entry, field, label=label, index=index)
+        for field in ("title", "kind", "subsystem", "workstream", "environment")
+    }
+    if not any(value is not None for value in fields.values()):
+        return None
+    return MemoryMetadata(
+        title=_clean_metadata_option(fields["title"]),
+        kind=_clean_metadata_option(fields["kind"]),
+        subsystem=_clean_metadata_option(fields["subsystem"]),
+        workstream=_clean_metadata_option(fields["workstream"]),
+        environment=_clean_metadata_option(fields["environment"]),
+    )
+
+
+def _run_edit_batch(*, cwd: Path) -> None:
+    """Apply a JSON list of edit objects from stdin in one engine session."""
+    items = _read_batch_json_list("edit")
+    engine_items: list[dict] = []
+    for index, entry in enumerate(items):
+        if not isinstance(entry, dict):
+            raise typer.BadParameter(f"--batch (edit) entry #{index} is not a JSON object.")
+        memory_id = entry.get("id")
+        if not isinstance(memory_id, str) or not memory_id.strip():
+            raise typer.BadParameter(f"--batch (edit) entry #{index} is missing a string `id`.")
+        text_value = _coerce_optional_str(entry, "text", label="edit", index=index)
+        partial_metadata = _partial_metadata_from_entry(entry, label="edit", index=index)
+        engine_items.append({"id": memory_id, "text": text_value, "metadata": partial_metadata})
+
+    memory = _open_memory(cwd)
+    try:
+        outcomes = memory.edit_many(engine_items)
+    finally:
+        memory.close()
+
+    rows: list[dict[str, object]] = []
+    any_failed = False
+    for outcome in outcomes:
+        row: dict[str, object] = {"memory_id": outcome.memory_id, "status": outcome.status}
+        if outcome.error:
+            row["error"] = outcome.error
+            any_failed = True
+        if outcome.record is not None:
+            row["record"] = _format_memory_record(outcome.record)
+        rows.append(row)
+
+    typer.echo(json.dumps(rows, indent=2))
+    if any_failed:
+        raise typer.Exit(code=1)
+
+
+def _run_save_batch(*, cwd: Path) -> None:
+    """Save a JSON list of memory objects from stdin in one engine session."""
+    items = _read_batch_json_list("save")
+    engine_items: list[dict] = []
+    for index, entry in enumerate(items):
+        if not isinstance(entry, dict):
+            raise typer.BadParameter(f"--batch (save) entry #{index} is not a JSON object.")
+        text_value = entry.get("text")
+        if not isinstance(text_value, str) or not text_value.strip():
+            raise typer.BadParameter(
+                f"--batch (save) entry #{index} is missing a non-empty string `text`."
+            )
+        metadata = _build_memory_metadata(
+            title=_coerce_optional_str(entry, "title", label="save", index=index),
+            kind=_coerce_optional_str(entry, "kind", label="save", index=index),
+            subsystem=_coerce_optional_str(entry, "subsystem", label="save", index=index),
+            workstream=_coerce_optional_str(entry, "workstream", label="save", index=index),
+            environment=_coerce_optional_str(entry, "environment", label="save", index=index),
+            require_complete=True,
+        )
+        engine_items.append({"text": text_value, "metadata": metadata})
+
+    memory = _open_memory(cwd)
+    try:
+        result = memory.save_many(engine_items)
+    finally:
+        memory.close()
+    typer.echo(json.dumps(result.to_dict()["saved"], indent=2))
+
+
+def _run_recall_batch(*, cwd: Path, limit: int) -> None:
+    """Recall for each query in a JSON list on stdin; emit a list of trees."""
+    items = _read_batch_json_list("recall")
+    queries: list[str] = []
+    for index, entry in enumerate(items):
+        if isinstance(entry, str):
+            text = entry.strip()
+        elif isinstance(entry, dict):
+            raw = entry.get("query")
+            if not isinstance(raw, str):
+                raise typer.BadParameter(
+                    f"--batch (recall) entry #{index} object must include a string `query`."
+                )
+            text = raw.strip()
+        else:
+            raise typer.BadParameter(
+                f"--batch (recall) entry #{index} must be a string or {{query}} object."
+            )
+        if not text:
+            raise typer.BadParameter(f"--batch (recall) entry #{index} query is empty.")
+        queries.append(text)
+
+    memory = _open_memory(cwd, read_only=True)
+    try:
+        results = memory.recall_many(queries, limit=limit)
+    finally:
+        memory.close()
+    typer.echo(json.dumps([result.to_dict() for result in results], indent=2))
 
 
 def _format_memory_record(record, *, show_full_text: bool = True) -> dict:
@@ -1863,11 +2031,15 @@ def show_command(
         "Edit a memory's body text and/or metadata in place and re-embed it. "
         "Pass new text as a positional argument for a one-shot edit, pipe or use "
         "--stdin for multi-line content, or omit text entirely to update metadata "
-        "only or open $EDITOR with the current body prefilled."
+        "only or open $EDITOR with the current body prefilled. Use --batch to read "
+        "a JSON list of edit objects from stdin and apply them in one engine session."
     ),
 )
 def edit_command(
-    memory_id: str = typer.Argument(..., help="Memory id, e.g. mem_abc123def456."),
+    memory_id: str | None = typer.Argument(
+        None,
+        help="Memory id, e.g. mem_abc123def456. Omit when using --from.",
+    ),
     new_text: str | None = typer.Argument(
         None,
         help="New text for the memory. Omit to use --stdin or $EDITOR.",
@@ -1903,8 +2075,28 @@ def edit_command(
             "argument. Optional when stdin is already piped and no positional text is given."
         ),
     ),
+    batch: bool = typer.Option(
+        False,
+        "--batch",
+        help=(
+            "Read a JSON list of edit objects from stdin and apply them in one engine "
+            "session. Each entry: {id, title?, kind?, subsystem?, workstream?, "
+            "environment?, text?}. Omitted fields keep current values. Always emits JSON."
+        ),
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
+    if batch:
+        if memory_id is not None or new_text is not None or from_stdin:
+            raise typer.BadParameter(
+                "--batch reads its inputs from stdin; do not pass a memory id, text, or --stdin."
+            )
+        _run_edit_batch(cwd=cwd)
+        return
+
+    if memory_id is None:
+        raise typer.BadParameter("memory_id is required unless --batch is set.")
+
     if from_stdin and new_text is not None:
         raise typer.BadParameter("--stdin cannot be combined with a positional new-text argument.")
 
@@ -2357,7 +2549,7 @@ def feedback(
 )
 def recall(
     query_parts: list[str] = typer.Argument(
-        ...,
+        None,
         help="Query text used to seed recall. Multiple words may be passed without shell quoting.",
     ),
     cwd: Path = typer.Option(
@@ -2367,9 +2559,23 @@ def recall(
         resolve_path=True,
     ),
     limit: int = typer.Option(15, "--limit", min=1),
+    batch: bool = typer.Option(
+        False,
+        "--batch",
+        help=(
+            "Read a JSON list of query strings (or {query} objects) from stdin and emit a "
+            "list of recall trees, one per query, in input order. Always emits JSON."
+        ),
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
-    query = " ".join(part for part in query_parts if part).strip()
+    if batch:
+        if query_parts:
+            raise typer.BadParameter("--batch reads queries from stdin; do not pass positional query text.")
+        _run_recall_batch(cwd=cwd, limit=limit)
+        return
+
+    query = " ".join(part for part in (query_parts or []) if part).strip()
     if not query:
         raise typer.BadParameter("Query text cannot be empty.")
     memory = _open_memory(cwd, read_only=True)
