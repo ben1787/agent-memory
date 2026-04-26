@@ -25,6 +25,7 @@ from agent_memory.embeddings import (
     build_embedder,
     cosine_similarity,
     embed_document,
+    embed_documents,
     embed_query,
     prune_fastembed_model_cache,
 )
@@ -57,6 +58,16 @@ from agent_memory.operations_log import (
 from agent_memory.query_log import QUERY_LOG_FILENAME, log_query
 from agent_memory.store import GraphStore
 from agent_memory.write_lock import ProjectWriteLock
+
+
+@dataclass
+class EditOutcome:
+    """Per-row result for `AgentMemory.edit_many`."""
+
+    memory_id: str
+    status: str  # "changed" | "unchanged" | "failed"
+    record: "MemoryRecord | None" = None
+    error: str | None = None
 
 
 SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -482,6 +493,111 @@ class AgentMemory:
             )
         return updated
 
+    def edit_many(
+        self,
+        items: list[dict],
+        *,
+        record_in_log: bool = True,
+    ) -> list[EditOutcome]:
+        """Apply many edits with one trailing cache reload and one batched embed call.
+
+        Each item: {"id": str, "text": str | None, "metadata": MemoryMetadata | None}.
+        `text=None` keeps the existing body; `metadata=None` keeps existing metadata
+        (a partial MemoryMetadata merges field-by-field via `merge_metadata`).
+        """
+        outcomes: list[EditOutcome | None] = [None] * len(items)
+        plans: list[tuple[int, MemoryRecord, str, str, MemoryMetadata, dict]] = []
+
+        for index, item in enumerate(items):
+            try:
+                memory_id = item["id"]
+                existing = self.get(memory_id)
+                if existing is None:
+                    outcomes[index] = EditOutcome(
+                        memory_id=memory_id,
+                        status="failed",
+                        error=f"Memory {memory_id!r} does not exist.",
+                    )
+                    continue
+                provided_text = item.get("text")
+                if provided_text is None:
+                    cleaned = existing.text
+                else:
+                    cleaned = provided_text.strip()
+                    if not cleaned:
+                        outcomes[index] = EditOutcome(
+                            memory_id=memory_id,
+                            status="failed",
+                            error="Memory text cannot be empty.",
+                        )
+                        continue
+                resolved_metadata = merge_metadata(item.get("metadata"), existing.metadata)
+                normalized_text = compose_embedding_text(cleaned, resolved_metadata)
+                words = word_count(normalized_text)
+                if words > self.config.max_memory_words:
+                    outcomes[index] = EditOutcome(
+                        memory_id=memory_id,
+                        status="failed",
+                        error=(
+                            f"Memory text is too long. Got {words} words, "
+                            f"max allowed is {self.config.max_memory_words}."
+                        ),
+                    )
+                    continue
+                if (
+                    cleaned.strip() == existing.text.strip()
+                    and resolved_metadata.to_dict() == existing.metadata.to_dict()
+                ):
+                    outcomes[index] = EditOutcome(
+                        memory_id=memory_id,
+                        status="unchanged",
+                        record=existing,
+                    )
+                    continue
+                before_payload = _record_to_payload(existing)
+                plans.append(
+                    (index, existing, cleaned, normalized_text, resolved_metadata, before_payload)
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                outcomes[index] = EditOutcome(
+                    memory_id=str(item.get("id", "")),
+                    status="failed",
+                    error=str(exc),
+                )
+
+        if plans:
+            embeddings = embed_documents(
+                self.embedder, [normalized for _, _, _, normalized, _, _ in plans]
+            )
+            timestamp = utc_now()
+            for (index, existing, cleaned, _normalized, resolved_metadata, before_payload), embedding in zip(
+                plans, embeddings, strict=True
+            ):
+                updated = MemoryRecord(
+                    id=existing.id,
+                    text=cleaned,
+                    created_at=existing.created_at,
+                    embedding=embedding,
+                    metadata=resolved_metadata,
+                    importance=existing.importance,
+                    access_count=existing.access_count,
+                    last_accessed=timestamp,
+                )
+                self.store.update_memory(updated)
+                self.metadata_store.upsert(existing.id, resolved_metadata)
+                if record_in_log:
+                    self.operations_log.record_edit(
+                        existing.id,
+                        before=before_payload,
+                        after=_record_to_payload(updated),
+                    )
+                outcomes[index] = EditOutcome(
+                    memory_id=existing.id, status="changed", record=updated
+                )
+            self._reload_cache()
+
+        return [outcome for outcome in outcomes if outcome is not None]
+
     def delete(self, memory_id: str, *, record_in_log: bool = True) -> MemoryRecord:
         """Delete a memory and its incident edges. Returns the deleted record."""
         existing = self.get(memory_id)
@@ -627,6 +743,46 @@ class AgentMemory:
                 raise ValueError("Batch save does not support shared metadata or embeddings.")
             saved = [self._save_one(item) for item in text]
         return SaveManyResult(saved=saved, total_memories=len(self._memories))
+
+    def save_many(self, items: list[dict]) -> SaveManyResult:
+        """Save many memories in one engine session with batched embedding.
+
+        Each item: {"text": str, "metadata": MemoryMetadata | None}.
+        """
+        prepared: list[tuple[str, MemoryMetadata, str]] = []
+        for index, item in enumerate(items):
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"save_many item #{index} is missing non-empty `text`.")
+            metadata = item.get("metadata")
+            resolved = merge_metadata(metadata, None)
+            cleaned = text.strip()
+            normalized = compose_embedding_text(cleaned, resolved)
+            words = word_count(normalized)
+            if words > self.config.max_memory_words:
+                raise ValueError(
+                    f"save_many item #{index} text is too long. "
+                    f"Got {words} words, max allowed is {self.config.max_memory_words}."
+                )
+            prepared.append((cleaned, resolved, normalized))
+
+        embeddings = (
+            embed_documents(self.embedder, [normalized for _, _, normalized in prepared])
+            if prepared
+            else []
+        )
+        saved: list[SaveResult] = []
+        for (cleaned, resolved, _normalized), embedding in zip(prepared, embeddings, strict=True):
+            saved.append(self._save_one(cleaned, metadata=resolved, embedding=embedding))
+        return SaveManyResult(saved=saved, total_memories=len(self._memories))
+
+    def recall_many(
+        self,
+        queries: list[str],
+        limit: int = 15,
+    ) -> list["RecallResult"]:
+        """Run recall for each query against the same in-memory engine state."""
+        return [self.recall(query, limit=limit) for query in queries]
 
     def capture_turn(
         self,

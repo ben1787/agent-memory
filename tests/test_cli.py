@@ -511,7 +511,7 @@ def test_save_command_requires_metadata_flags(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     combined = _normalized_cli_output(result)
-    assert "Missing option" in combined
+    assert "save requires explicit metadata" in combined
     assert "--title" in combined
 
 
@@ -715,6 +715,171 @@ def test_edit_command_updates_metadata_without_text(tmp_path: Path) -> None:
     assert payload["title"] == "Updated title"
     assert payload["workstream"] == "event_debugging"
     assert payload["subsystem"] == "billing"
+
+
+def test_edit_command_batch_applies_list_in_one_session(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        result_one = memory.save(
+            "first body",
+            metadata=MemoryMetadata(
+                title="One",
+                kind="operational",
+                subsystem="billing",
+                workstream="webhooks",
+                environment="prod",
+            ),
+        )
+        result_two = memory.save(
+            "second body",
+            metadata=MemoryMetadata(
+                title="Two",
+                kind="operational",
+                subsystem="billing",
+                workstream="webhooks",
+                environment="prod",
+            ),
+        )
+        result_three = memory.save(
+            "third body",
+            metadata=MemoryMetadata(
+                title="Three",
+                kind="operational",
+                subsystem="billing",
+                workstream="webhooks",
+                environment="prod",
+            ),
+        )
+        id_one = result_one.saved[0].memory_id
+        id_two = result_two.saved[0].memory_id
+        id_three = result_three.saved[0].memory_id
+        original_three_text = memory.get(id_three).text
+    finally:
+        memory.close()
+
+    edits = [
+        {"id": id_one, "text": "first body rewritten", "workstream": "event_debugging"},
+        {"id": id_two, "title": "Two updated"},
+        {"id": id_three},
+        {"id": "mem_does_not_exist", "text": "no-op"},
+    ]
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["edit", "--cwd", str(tmp_path), "--batch"],
+        input=json.dumps(edits),
+    )
+
+    assert result.exit_code == 1, result.stdout  # one failure -> nonzero
+    rows = json.loads(result.stdout)
+    by_id = {row["memory_id"]: row for row in rows}
+    assert by_id[id_one]["status"] == "changed"
+    assert by_id[id_one]["record"]["text"] == "first body rewritten"
+    assert by_id[id_one]["record"]["workstream"] == "event_debugging"
+    assert by_id[id_two]["status"] == "changed"
+    assert by_id[id_two]["record"]["title"] == "Two updated"
+    assert by_id[id_two]["record"]["text"] == "second body"
+    assert by_id[id_three]["status"] == "unchanged"
+    assert by_id["mem_does_not_exist"]["status"] == "failed"
+    counts = {status: sum(1 for r in rows if r["status"] == status) for status in ("changed", "unchanged", "failed")}
+    assert counts == {"changed": 2, "unchanged": 1, "failed": 1}
+
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        reloaded_one = memory.get(id_one)
+        reloaded_two = memory.get(id_two)
+        reloaded_three = memory.get(id_three)
+        assert reloaded_one.text == "first body rewritten"
+        assert reloaded_one.metadata.workstream == "event_debugging"
+        assert reloaded_one.metadata.subsystem == "billing"  # untouched
+        assert reloaded_two.text == "second body"
+        assert reloaded_two.metadata.title == "Two updated"
+        assert reloaded_three.text == original_three_text
+        # Cache reload happened: similarity edges include the rewritten record.
+        recall = memory.recall("first body rewritten", limit=3)
+        assert any(hit.memory_id == id_one for hit in recall.hits)
+    finally:
+        memory.close()
+
+
+def test_save_command_batch_persists_list(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    items = [
+        {
+            "title": f"Mem {i}",
+            "kind": "operational",
+            "subsystem": "billing",
+            "workstream": "webhooks",
+            "environment": "prod",
+            "text": f"body {i}",
+        }
+        for i in range(3)
+    ]
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["save", "--cwd", str(tmp_path), "--batch"],
+        input=json.dumps(items),
+    )
+    assert result.exit_code == 0, result.stdout
+    rows = json.loads(result.stdout)
+    assert len(rows) == 3
+    saved_ids = [row["memory_id"] for row in rows]
+    assert all(mid.startswith("mem_") for mid in saved_ids)
+
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        for mid, item in zip(saved_ids, items, strict=True):
+            record = memory.get(mid)
+            assert record is not None
+            assert record.text == item["text"]
+            assert record.metadata.title == item["title"]
+            assert record.metadata.workstream == "webhooks"
+    finally:
+        memory.close()
+
+
+def test_recall_command_batch_returns_one_tree_per_query(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        memory.save(
+            "alpha cats love yarn",
+            metadata=MemoryMetadata(
+                title="Cats",
+                kind="operational",
+                subsystem="zoo",
+                workstream="cats",
+                environment="prod",
+            ),
+        )
+        memory.save(
+            "beta dogs love bones",
+            metadata=MemoryMetadata(
+                title="Dogs",
+                kind="operational",
+                subsystem="zoo",
+                workstream="dogs",
+                environment="prod",
+            ),
+        )
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["recall", "--cwd", str(tmp_path), "--batch", "--limit", "5"],
+        input=json.dumps(["alpha cats", {"query": "beta dogs"}]),
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, list)
+    assert len(payload) == 2
+    assert payload[0]["query"] == "alpha cats"
+    assert payload[1]["query"] == "beta dogs"
+    assert all("nodes" in tree for tree in payload)
 
 
 def test_edit_command_stdin_handles_special_chars(tmp_path: Path) -> None:

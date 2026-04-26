@@ -1,6 +1,6 @@
 [project]
 name = "agent-memory"
-version = "0.2.12"
+version = "0.2.13"
 description = "Local-first associative memory graph for agents, CLIs, and MCP clients"
 readme = "README.md"
 authors = [
