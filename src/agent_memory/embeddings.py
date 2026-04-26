@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +95,9 @@ class HashEmbedder:
 
 
 def stable_fastembed_cache_dir() -> Path:
+    env_override = os.environ.get("FASTEMBED_CACHE_PATH")
+    if env_override:
+        return Path(env_override)
     return Path.home() / ".cache" / "agent-memory" / "fastembed"
 
 
