@@ -122,3 +122,82 @@ def test_perform_upgrade_reports_api_failure(monkeypatch) -> None:
     result = upgrade.perform_upgrade()
     assert result["status"] == "error"
     assert "GitHub releases API" in result["details"]
+
+
+def test_perform_upgrade_reports_source_install_when_running_from_console_script(
+    tmp_path, monkeypatch
+) -> None:
+    script = tmp_path / "agent-memory"
+    script.write_text(
+        "#!/usr/bin/env python3\nfrom agent_memory.cli import main\nmain()\n",
+        encoding="utf-8",
+    )
+    fake_latest = upgrade.LatestRelease(
+        tag="v999.0.0",
+        version_tuple=upgrade._parse_version("v999.0.0"),
+        asset_url="",
+        asset_sha_url="",
+    )
+    monkeypatch.setattr(upgrade.sys, "argv", [str(script)])
+    monkeypatch.setattr(upgrade.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        upgrade,
+        "_detect_asset_name",
+        lambda: "agent-memory-macos-arm64.tar.gz",
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "_resolve_latest_release",
+        lambda repo=upgrade.DEFAULT_REPO: fake_latest,
+    )
+
+    result = upgrade.perform_upgrade()
+
+    assert result["status"] == "error"
+    assert "package manager" in result["details"]
+
+
+def test_resolve_running_binary_accepts_native_binary(tmp_path, monkeypatch) -> None:
+    binary = tmp_path / "agent-memory"
+    binary.write_bytes(b"\x7fELFfake executable")
+    monkeypatch.setattr(upgrade.sys, "argv", [str(binary)])
+    monkeypatch.setattr(upgrade.shutil, "which", lambda _name: None)
+
+    assert upgrade._resolve_running_binary_path() == binary.resolve()
+
+
+def test_resolve_running_binary_rejects_console_script(tmp_path, monkeypatch) -> None:
+    script = tmp_path / "agent-memory"
+    script.write_text(
+        "#!/usr/bin/env python3\nfrom agent_memory.cli import main\nmain()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(upgrade.sys, "argv", [str(script)])
+    monkeypatch.setattr(upgrade.shutil, "which", lambda _name: None)
+
+    assert upgrade._resolve_running_binary_path() is None
+
+
+def test_resolve_running_binary_does_not_fallback_from_console_script_to_path(
+    tmp_path, monkeypatch
+) -> None:
+    script = tmp_path / "agent-memory-script"
+    script.write_text(
+        "#!/usr/bin/env python3\nfrom agent_memory.cli import main\nmain()\n",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "agent-memory"
+    binary.write_bytes(b"\x7fELFfake executable")
+    monkeypatch.setattr(upgrade.sys, "argv", [str(script)])
+    monkeypatch.setattr(upgrade.shutil, "which", lambda _name: str(binary))
+
+    assert upgrade._resolve_running_binary_path() is None
+
+
+def test_resolve_running_binary_rejects_python_module_path(tmp_path, monkeypatch) -> None:
+    module = tmp_path / "cli.py"
+    module.write_text("print('not a binary')\n", encoding="utf-8")
+    monkeypatch.setattr(upgrade.sys, "argv", [str(module)])
+    monkeypatch.setattr(upgrade.shutil, "which", lambda _name: None)
+
+    assert upgrade._resolve_running_binary_path() is None

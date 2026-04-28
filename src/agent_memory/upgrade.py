@@ -344,15 +344,46 @@ def _resolve_running_binary_path() -> Path | None:
     if candidate:
         path = Path(candidate)
         if path.exists() and path.is_file():
-            return path.resolve()
+            resolved = path.resolve()
+            if _is_standalone_binary(resolved):
+                return resolved
+            return None
     # PyInstaller sets sys.executable to the bundled binary path.
     if hasattr(sys, "frozen") and getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve()
+        path = Path(sys.executable).resolve()
+        if _is_standalone_binary(path):
+            return path
+        return None
     # Last resort: look for `agent-memory` on PATH.
     on_path = shutil.which("agent-memory")
     if on_path:
-        return Path(on_path).resolve()
+        resolved = Path(on_path).resolve()
+        if _is_standalone_binary(resolved):
+            return resolved
     return None
+
+
+def _is_standalone_binary(path: Path) -> bool:
+    """Return True when path looks like a native executable we can replace.
+
+    Source installs expose console-script shims and Python modules. Replacing
+    either with a release binary corrupts the install, so only self-upgrade
+    files with native executable magic.
+    """
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(4)
+    except OSError:
+        return False
+    if header.startswith(b"MZ"):
+        return True
+    return header in {
+        b"\x7fELF",  # Linux
+        b"\xcf\xfa\xed\xfe",  # Mach-O 64-bit, little endian
+        b"\xfe\xed\xfa\xcf",  # Mach-O 64-bit, big endian
+        b"\xca\xfe\xba\xbe",  # Mach-O universal
+        b"\xbe\xba\xfe\xca",  # Mach-O universal, swapped
+    }
 
 
 def _sha256(path: Path) -> str:
