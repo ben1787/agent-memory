@@ -659,6 +659,34 @@ def _refresh_integrations_payload(
     }
 
 
+def _print_refresh_integrations_payload(payload: dict[str, object]) -> None:
+    typer.echo(f"Registry: {payload['registry_path']}")
+    refreshed = payload["refreshed_projects"]
+    assert isinstance(refreshed, list)
+    if not refreshed:
+        typer.echo("No registered Agent Memory projects were refreshed.")
+    for project_payload in refreshed:
+        if not isinstance(project_payload, dict):
+            continue
+        typer.echo(f"Project root: {project_payload.get('project_root')}")
+        roots = project_payload.get("refreshed_roots")
+        if isinstance(roots, list) and roots:
+            typer.echo("  Refreshed roots:")
+            for root in roots:
+                typer.echo(f"  - {root}")
+        skipped = project_payload.get("skipped_missing_roots")
+        if isinstance(skipped, list) and skipped:
+            typer.echo("  Missing linked roots:")
+            for root in skipped:
+                typer.echo(f"  - {root}")
+
+    missing_roots = payload.get("missing_roots")
+    if isinstance(missing_roots, list) and missing_roots:
+        typer.echo("Removed missing registered roots:")
+        for root in missing_roots:
+            typer.echo(f"- {root}")
+
+
 def _default_smoke_reinstall_from(cwd: Path | None = None) -> Path | None:
     candidate = (cwd or Path.cwd()).resolve()
     pyproject_path = candidate / "pyproject.toml"
@@ -3134,26 +3162,35 @@ def refresh_integrations_command(
     if as_json:
         typer.echo(json.dumps(payload, indent=2))
         return
+    _print_refresh_integrations_payload(payload)
 
-    typer.echo(f"Registry: {payload['registry_path']}")
-    refreshed = payload["refreshed_projects"]
-    assert isinstance(refreshed, list)
-    if not refreshed:
-        typer.echo("No registered Agent Memory projects were refreshed.")
-    for project_payload in refreshed:
-        if not isinstance(project_payload, dict):
-            continue
-        typer.echo(f"Project root: {project_payload.get('project_root')}")
-        roots = project_payload.get("refreshed_roots")
-        if isinstance(roots, list) and roots:
-            typer.echo("  Refreshed roots:")
-            for root in roots:
-                typer.echo(f"  - {root}")
-        skipped = project_payload.get("skipped_missing_roots")
-        if isinstance(skipped, list) and skipped:
-            typer.echo("  Missing linked roots:")
-            for root in skipped:
-                typer.echo(f"  - {root}")
+
+@app.command(
+    name="update",
+    help=(
+        "Refresh Agent Memory hooks/instructions everywhere this machine already uses the current binary. "
+        "By default this updates every registered project family, such as shared stores and their linked repos."
+    ),
+)
+def update_command(
+    cwd: Path = typer.Option(
+        Path("."),
+        "--cwd",
+        help="Project directory or any path inside the project.",
+        resolve_path=True,
+    ),
+    current_project_only: bool = typer.Option(
+        False,
+        "--current-project-only",
+        help="Refresh only the cwd project family instead of every registered Agent Memory project family.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+) -> None:
+    payload = _refresh_integrations_payload(cwd=cwd, all_known=not current_project_only)
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    _print_refresh_integrations_payload(payload)
 
 
 @app.command(

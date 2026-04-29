@@ -1418,6 +1418,65 @@ def test_init_with_link_root_wires_child_repo_to_parent_store(tmp_path: Path, mo
     assert str(child_root.resolve()) not in claude_command
 
 
+def test_update_command_refreshes_all_known_by_default(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    seen: dict[str, object] = {}
+
+    def fake_refresh_integrations_payload(*, cwd: Path, all_known: bool) -> dict[str, object]:
+        seen["cwd"] = cwd
+        seen["all_known"] = all_known
+        return {
+            "registry_path": str(tmp_path / "known-projects.json"),
+            "refreshed_projects": [
+                {
+                    "project_root": str(tmp_path / "porter"),
+                    "status": "refreshed",
+                    "refreshed_roots": [str(tmp_path / "porter")],
+                    "skipped_missing_roots": [],
+                }
+            ],
+            "missing_roots": [],
+        }
+
+    monkeypatch.setattr("agent_memory.cli._refresh_integrations_payload", fake_refresh_integrations_payload)
+
+    result = runner.invoke(
+        app,
+        ["update", "--cwd", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert seen["cwd"] == tmp_path.resolve()
+    assert seen["all_known"] is True
+    payload = json.loads(result.stdout)
+    assert payload["refreshed_projects"][0]["project_root"] == str(tmp_path / "porter")
+
+
+def test_update_command_can_limit_to_current_project_family(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    seen: dict[str, object] = {}
+
+    def fake_refresh_integrations_payload(*, cwd: Path, all_known: bool) -> dict[str, object]:
+        seen["cwd"] = cwd
+        seen["all_known"] = all_known
+        return {
+            "registry_path": str(tmp_path / "known-projects.json"),
+            "refreshed_projects": [],
+            "missing_roots": [],
+        }
+
+    monkeypatch.setattr("agent_memory.cli._refresh_integrations_payload", fake_refresh_integrations_payload)
+
+    result = runner.invoke(
+        app,
+        ["update", "--cwd", str(tmp_path), "--current-project-only", "--json"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert seen["cwd"] == tmp_path.resolve()
+    assert seen["all_known"] is False
+
+
 def test_migrate_memory_md_imports_durable_notes_only(tmp_path: Path) -> None:
     runner = CliRunner()
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))

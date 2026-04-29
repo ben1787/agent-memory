@@ -18,10 +18,10 @@ AUTO_RECALL_LIMIT = 3
 AUTO_RECALL_MIN_QUERY_SIMILARITY = 0.7
 AUTO_RECALL_MAX_WORDS_PER_MEMORY = 48
 AUTO_RECALL_FALLBACK = 'If you need more, call `agent-memory recall "<more specific query>"`.'
-STORING_SECTION = """Storing: save anything worth remembering later. Each memory says *what* the fact is, *why* you saved it, and *when* it will be useful (30-250 words). Use `agent-memory save --title ... --kind ... --subsystem ... --workstream ... --environment ... --stdin`; reuse existing metadata spellings.
+STORING_SECTION = """Storing: save anything worth remembering later. Each memory says *what* the fact is, *why* you saved it, and *when* it will be useful as a self-contained note for a future reader with no conversational context (50-250 words). Use `agent-memory save --title ... --kind ... --subsystem ... --workstream ... --environment ... --stdin`; reuse existing metadata spellings.
 Curate: fix unclear/wrong recalled memories with `agent-memory edit <id>`; delete obsolete ones with `agent-memory delete <id> --yes`."""
 SAVE_NUDGE_LINES = (
-    "Memory: save what's worth remembering later (*what*/*why*/*when*, 30-250 words) via `agent-memory save ... --stdin`. Edit/delete recalled memories that are unclear, wrong, or obsolete.",
+    "Memory: save what's worth remembering later (*what*/*why*/*when*, self-contained 50-250 words for a future reader with no conversational context) via `agent-memory save --title ... --kind ... --subsystem ... --workstream ... --environment ... --stdin`. Edit/delete recalled memories that are unclear, wrong, or obsolete.",
 )
 
 _DEFAULT_CONSOLIDATION_STATE: dict[str, Any] = {

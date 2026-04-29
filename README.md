@@ -133,6 +133,7 @@ Agent Memory enforces **at most one store along any ancestor chain**. If you try
 | `agent-memory edit <id> [<new text>]` | Edit a memory in place (one-shot, `--stdin`, or `$EDITOR`) |
 | `agent-memory delete <id> --yes` | Delete a memory |
 | `agent-memory undo` | Reverse the most recent save / edit / delete |
+| `agent-memory update` | Refresh hooks/instructions everywhere the current binary is already installed |
 | `agent-memory upgrade` | Self-update to the latest GitHub release |
 | `agent-memory stats` | Memory + relationship counts |
 | `agent-memory hook-log` | Recent UserPromptSubmit hook activity (debug aid) |
@@ -172,6 +173,20 @@ AGENT_MEMORY_PROJECT_ROOT=/abs/path/to/repo agent-memory _hook claude-user-promp
 It dispatches to the binary on `PATH`, so the same hook config works on any machine with `agent-memory` installed (regardless of install method). On every prompt, the hook can recall against the raw user prompt and inject only strong matches at the current `0.7` parent-score floor; on the configured `1 + X` cadence, it also injects the broader memory/save guidance.
 
 For redundancy, `init` also injects an `Agent Memory` section into `CLAUDE.md` and `AGENTS.md` if those files already exist. The block tells the agent how to use the CLI even if the prompt-submit hook ever breaks or gets disabled.
+
+## Refresh integrations
+
+If you change Agent Memory's injected instructions, hook commands, or linked-root wiring and want to push that update out to repos that already use Agent Memory, run:
+
+```bash
+agent-memory update
+```
+
+That refreshes every registered project family on the current machine using the current binary. To limit the rewrite to just the project family for the current cwd, use:
+
+```bash
+agent-memory update --current-project-only
+```
 
 ## Optional: MCP server
 

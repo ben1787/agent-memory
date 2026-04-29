@@ -12,6 +12,9 @@ wheels/
 # Local agent-memory data
 .agent-memory/
 
+# Local Claude Code state and worktrees
+.claude/
+
 # Benchmark artifacts
 reports/
 benchmark_corpus/raw_articles/

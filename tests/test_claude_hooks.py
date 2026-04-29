@@ -53,10 +53,11 @@ def test_claude_user_prompt_submit_returns_additional_context(tmp_path: Path) ->
     assert "--subsystem" in context
     assert "--workstream" in context
     assert "--environment" in context
-    assert "30-250 words" in context
+    assert "50-250 words" in context
     assert "*what*" in context
     assert "*why*" in context
     assert "*when*" in context
+    assert "no conversational context" in context
     assert "agent-memory edit" in context
     assert "agent-memory delete" in context
     assert "Possibly related memories:" in context
@@ -115,6 +116,13 @@ def test_claude_user_prompt_submit_skips_non_interval_turns(tmp_path: Path) -> N
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Agent Memory\n" not in context
     assert "Memory: save what's worth remembering later" in context
+    assert "self-contained 50-250 words" in context
+    assert "no conversational context" in context
+    assert "--title" in context
+    assert "--kind" in context
+    assert "--subsystem" in context
+    assert "--workstream" in context
+    assert "--environment" in context
 
 
 def test_claude_user_prompt_submit_injects_auto_recall_on_non_interval_turn(tmp_path: Path) -> None:
@@ -144,6 +152,13 @@ def test_claude_user_prompt_submit_injects_auto_recall_on_non_interval_turn(tmp_
     assert "Possibly related memories:" in context
     assert "Billing webhook handler lives in services/billing/webhooks.py." in context
     assert "Memory: save what's worth remembering later" in context
+    assert "self-contained 50-250 words" in context
+    assert "no conversational context" in context
+    assert "--title" in context
+    assert "--kind" in context
+    assert "--subsystem" in context
+    assert "--workstream" in context
+    assert "--environment" in context
     assert "[A] mem_" in context
     assert "agent-memory feedback evt_" in context
     assert "--stdin" in context
