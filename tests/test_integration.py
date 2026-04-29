@@ -454,6 +454,8 @@ def test_install_memory_instructions_injects_after_h1(tmp_path: Path) -> None:
         assert "Agent Memory" in text
         assert "agent-memory recall" in text
         assert "agent-memory save" in text
+        assert "50-250" in text
+        assert "no conversational context" in text
         # CLI-only — must NOT push the agent toward MCP tool calls.
         assert "save_memory" not in text
         assert "recall_memories" not in text

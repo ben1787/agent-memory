@@ -159,17 +159,17 @@ Rules:
 - If prior project knowledge might help and the automatic recall is missing or incomplete, consider calling `recall_memories` with a concrete query tied to the current task.
 - After finishing the work for the turn, decide whether there are 0-3 durable memories worth saving with `save_memory`.
 - One strong operational fact is enough: a file/module location, hook or threshold rule, install/update gotcha, runtime quirk, or explicit user correction.
-- When saving, pass explicit metadata arguments: `title`, `kind`, `subsystem`, `workstream`, and `environment`. Keep the memory body text plain.
+- When saving, pass explicit metadata arguments: `title`, `kind`, `subsystem`, `workstream`, and `environment`. Keep the memory body text plain, self-contained, and written for a reader with no conversational context.
 - If the MCP tools are unavailable in the current client, fall back to `agent-memory recall` and `agent-memory save` in the current project root.
 - Prefer stable facts, decisions, file locations, constraints, preferences, and discovered relationships.
-- Avoid saving noise, repeated wording, or giant raw dumps when a shorter memory will do.
+- Do not save terse fragments or giant raw dumps. Target 50-250 words with concrete detail about what changed, where it lives, why it matters, and how to use the fact correctly.
 - Save memories into this project store only; never write into some parent or sibling project by accident.
 
 Suggested workflow:
 1. Check any automatically injected Agent Memory context first.
 2. If prior project knowledge might help and the injected context is missing or incomplete, call `agent-memory recall "<task-specific query>"`.
 3. Do the work.
-4. Before the final answer, if the work produced durable project knowledge, save 0-3 concise memories with explicit metadata fields.
+4. Before the final answer, if the work produced durable project knowledge, save 0-3 self-contained memories with explicit metadata fields and a 50-250 word body.
 5. Save it if it would save future code inspection, prevent a likely wrong assumption, or narrow the search path.
 6. Reuse existing metadata spellings when they fit, and only invent a new value when nothing existing matches.
 

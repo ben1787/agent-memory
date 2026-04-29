@@ -46,18 +46,18 @@ Phrase the query the way the answer would phrase itself, not the way a question 
 
 ### Save when something durable surfaced
 
-Before sending your final answer, ask: *"Did I just resolve 0–3 durable repo-specific facts future-me would want without re-reading this whole conversation?"* If yes, save them. One strong operational fact is enough. Pass metadata as explicit command inputs and keep the body text plain:
+Before sending your final answer, ask: *"Did I just resolve 0–3 durable repo-specific facts future-me would want without re-reading this whole conversation?"* If yes, save them. One strong operational fact is enough. Pass metadata as explicit command inputs and keep the body text plain. Write each memory as a standalone note for a future reader who has no conversational context. Target `50-250` words and include the concrete details that make the fact reusable:
 
 ```
 cat <<'EOF' | agent-memory save --title "Billing webhook handler" --kind "operational" --subsystem "billing" --workstream "webhooks" --environment "prod" --stdin
-Billing webhook handler lives in services/billing/webhooks.py. This saves a repo search when debugging Stripe events.
+Stripe webhook events for billing are handled in `services/billing/webhooks.py`. Start debugging there before chasing the generic event router, because this module owns the billing-specific signature verification, event-to-command mapping, and retry logging. When invoice or subscription events look dropped in production, inspect this file first and compare its expected event types against the webhook dashboard replay payload.
 EOF
 ```
 
-For agents and anything with quotes, backticks, dollar signs, or newlines, prefer piped stdin so the shell cannot rewrite the text before `agent-memory` sees it. Prefer exact names in metadata: subsystem, file/module, endpoint, tool, class, table, feature flag, vendor, or dashboard names. Reuse existing spellings when they fit; otherwise create a new value. For a very short shell-safe one-liner, quoted positional args are still fine:
+For agents and anything with quotes, backticks, dollar signs, or newlines, prefer piped stdin so the shell cannot rewrite the text before `agent-memory` sees it. Prefer exact names in metadata: subsystem, file/module, endpoint, tool, class, table, feature flag, vendor, or dashboard names. Reuse existing spellings when they fit; otherwise create a new value. Do not write a vague one-liner that only makes sense if someone remembers this chat. For a shell-safe one-liner, quoted positional args are still fine:
 
 ```
-agent-memory save --title "Billing webhook handler" --kind "operational" --subsystem "billing" --workstream "webhooks" --environment "prod" "Billing webhook handler lives in services/billing/webhooks.py."
+agent-memory save --title "Billing webhook handler" --kind "operational" --subsystem "billing" --workstream "webhooks" --environment "prod" "Stripe webhook events for billing are handled in services/billing/webhooks.py. Start debugging there before chasing the generic event router, because this module owns the billing-specific signature verification, event-to-command mapping, and retry logging. When invoice or subscription events look dropped in production, inspect this file first and compare its expected event types against the webhook dashboard replay payload."
 ```
 
 **Save these:**
@@ -75,13 +75,14 @@ agent-memory save --title "Billing webhook handler" --kind "operational" --subsy
 - Generic programming knowledge or framework docs
 - Verbatim chat or transcript dumps
 - Ephemeral debugging state or in-progress task notes
-- Long prose — prefer one fact per memory, ≤30 words
+- Terse fragments or context-dependent notes; each memory should stand alone and usually be `50-250` words
 
 **Worth saving test:**
 - Save it if it would save future code inspection, prevent a likely wrong assumption, or narrow the search path
 - Especially save concrete “how/why/where does this work?” facts you confirmed from code inspection or debugging
 - Use explicit metadata fields: `--title`, `--kind`, `--subsystem`, `--workstream`, and `--environment`
 - Keep the body text plain; metadata is not parsed out of the body
+- Assume the reader has no conversational context and needs the memory to explain itself
 
 ### Recover when you got it wrong
 

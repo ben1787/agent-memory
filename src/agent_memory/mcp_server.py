@@ -39,6 +39,7 @@ def build_server(default_project_root: Path | None = None) -> FastMCP:
             f"{project_scope} "
             "Recall relevant memories before substantive work. After meaningful steps, persist the user turn, "
             "assistant turn, and 1-3 distilled durable memories with capture_turn. "
+            "Write durable memories as self-contained 50-250 word notes for a reader with no conversational context. "
             "Recall ranks memories by the highest parent-similarity score from the query root through "
             "memory-memory similarity edges."
         ),

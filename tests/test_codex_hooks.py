@@ -51,10 +51,11 @@ def test_codex_user_prompt_submit_returns_hook_specific_context(tmp_path: Path) 
     assert "--subsystem" in context
     assert "--workstream" in context
     assert "--environment" in context
-    assert "30-250 words" in context
+    assert "50-250 words" in context
     assert "*what*" in context
     assert "*why*" in context
     assert "*when*" in context
+    assert "no conversational context" in context
     assert "agent-memory edit" in context
     assert "agent-memory delete" in context
     assert "Possibly related memories:" in context
@@ -120,6 +121,13 @@ def test_codex_user_prompt_submit_skips_non_interval_turns(tmp_path: Path) -> No
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Agent Memory\n" not in context
     assert "Memory: save what's worth remembering later" in context
+    assert "self-contained 50-250 words" in context
+    assert "no conversational context" in context
+    assert "--title" in context
+    assert "--kind" in context
+    assert "--subsystem" in context
+    assert "--workstream" in context
+    assert "--environment" in context
 
     entries = hook_log_entries(tmp_path)
     assert entries[0]["action"] == "start"
@@ -158,6 +166,13 @@ def test_codex_user_prompt_submit_injects_auto_recall_on_non_interval_turn(tmp_p
     assert "Possibly related memories:" in context
     assert "Billing webhook handler lives in services/billing/webhooks.py." in context
     assert "Memory: save what's worth remembering later" in context
+    assert "self-contained 50-250 words" in context
+    assert "no conversational context" in context
+    assert "--title" in context
+    assert "--kind" in context
+    assert "--subsystem" in context
+    assert "--workstream" in context
+    assert "--environment" in context
     assert "[A] mem_" in context
     assert "agent-memory feedback evt_" in context
     assert "--stdin" in context
@@ -225,7 +240,10 @@ def test_codex_user_prompt_submit_refreshes_stale_prompt_artifacts(tmp_path: Pat
         check=True,
     )
 
-    assert (tmp_path / ".agent-memory" / "instructions.md").read_text(encoding='utf-8') == default_instructions()
+    instructions_text = (tmp_path / ".agent-memory" / "instructions.md").read_text(encoding='utf-8')
+    assert instructions_text == default_instructions()
+    assert "50-250 words" in instructions_text
+    assert "no conversational context" in instructions_text
     claude_text = (tmp_path / "CLAUDE.md").read_text(encoding='utf-8')
     assert "old stale block" not in claude_text
     assert "Recall when useful" in claude_text
