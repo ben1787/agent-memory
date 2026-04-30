@@ -30,10 +30,13 @@ from agent_memory.embeddings import (
     prune_fastembed_model_cache,
 )
 from agent_memory.models import (
+    ConsolidationCandidateGroup,
     ConsolidationCluster,
     ConsolidationClusterEdge,
+    ConsolidationFeedbackCandidate,
     ConsolidationClusterMember,
     ConsolidationReport,
+    ConsolidationUnretrievedCandidate,
     MemoryCluster,
     MemoryHit,
     MemoryMetadata,
@@ -56,6 +59,12 @@ from agent_memory.operations_log import (
     OperationsLog,
 )
 from agent_memory.query_log import QUERY_LOG_FILENAME, log_query
+from agent_memory.retrieval_feedback import (
+    NEGATIVE_MEMORY_FEEDBACK_LABELS,
+    POSITIVE_MEMORY_FEEDBACK_LABELS,
+    memory_feedback_label_counts,
+    reset_memory_feedback,
+)
 from agent_memory.store import GraphStore
 from agent_memory.write_lock import ProjectWriteLock
 
@@ -75,6 +84,45 @@ STDIN_SAVE_HINT = (
     " If this text came through a shell or agent command, prefer piping it to the CLI "
     "`save`/`edit` stdin mode with a quoted heredoc so quotes, backticks, and newlines "
     "cannot be rewritten before Agent Memory sees them."
+)
+CONSOLIDATION_STOPWORDS = frozenset(
+    {
+        "about",
+        "after",
+        "agent",
+        "agents",
+        "already",
+        "before",
+        "branch",
+        "current",
+        "data",
+        "debug",
+        "dev",
+        "does",
+        "done",
+        "field",
+        "fields",
+        "file",
+        "from",
+        "local",
+        "memory",
+        "needs",
+        "path",
+        "paths",
+        "porter",
+        "repo",
+        "route",
+        "server",
+        "shared",
+        "should",
+        "status",
+        "still",
+        "tool",
+        "tools",
+        "uses",
+        "with",
+        "workflow",
+    }
 )
 
 
@@ -128,6 +176,32 @@ def _metadata_from_payload(
 
 def normalize_text(value: str) -> str:
     return " ".join(value.lower().split())
+
+
+def normalize_metadata_value(value: str | None) -> str:
+    if not value:
+        return ""
+    return normalize_text(value)
+
+
+def compact_metadata_value(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def metadata_variant_key(value: str | None) -> str:
+    compact = compact_metadata_value(value)
+    if len(compact) > 4 and compact.endswith("s"):
+        return compact[:-1]
+    return compact
+
+
+def created_at_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def word_count(text: str) -> int:
@@ -491,6 +565,11 @@ class AgentMemory:
                 before=before_payload,
                 after=_record_to_payload(updated),
             )
+            reset_memory_feedback(
+                self.project.root,
+                [existing.id],
+                reason="memory_edited",
+            )
         return updated
 
     def edit_many(
@@ -595,6 +674,12 @@ class AgentMemory:
                     memory_id=existing.id, status="changed", record=updated
                 )
             self._reload_cache()
+            if record_in_log:
+                reset_memory_feedback(
+                    self.project.root,
+                    [existing.id for _, existing, *_ in plans],
+                    reason="memory_edited",
+                )
 
         return [outcome for outcome in outcomes if outcome is not None]
 
@@ -969,6 +1054,497 @@ class AgentMemory:
             seed_score=top_query_similarity,
         )
 
+    def _consolidation_member_sort_key(self, memory_id: str) -> tuple[str, str]:
+        memory = self._memory_by_id[memory_id]
+        return (memory.created_at, memory.id)
+
+    def _consolidation_candidate_group(
+        self,
+        group_id: str,
+        reason: str,
+        memory_ids: list[str],
+        *,
+        recommended_action: str,
+        signals: dict[str, object] | None = None,
+    ) -> ConsolidationCandidateGroup:
+        member_ids = sorted(dict.fromkeys(memory_ids), key=self._consolidation_member_sort_key)
+        return ConsolidationCandidateGroup(
+            group_id=group_id,
+            reason=reason,
+            member_ids=member_ids,
+            members=[
+                ConsolidationClusterMember(
+                    memory_id=member_id,
+                    text=self._memory_by_id[member_id].text,
+                    created_at=self._memory_by_id[member_id].created_at,
+                    metadata=self._memory_by_id[member_id].metadata,
+                )
+                for member_id in member_ids
+            ],
+            recommended_action=recommended_action,
+            signals=signals or {},
+        )
+
+    def _metadata_field_value(self, memory: MemoryRecord, field_name: str) -> str:
+        value = getattr(memory.metadata, field_name)
+        return value.strip() if isinstance(value, str) else ""
+
+    def _metadata_key(self, memory: MemoryRecord) -> tuple[str, str, str, str]:
+        return (
+            compact_metadata_value(memory.metadata.kind),
+            compact_metadata_value(memory.metadata.subsystem),
+            compact_metadata_value(memory.metadata.workstream),
+            compact_metadata_value(memory.metadata.environment),
+        )
+
+    def _title_tokens(self, memory: MemoryRecord) -> set[str]:
+        source = " ".join(
+            [
+                self._metadata_field_value(memory, "title"),
+                self._metadata_field_value(memory, "subsystem"),
+                self._metadata_field_value(memory, "workstream"),
+            ]
+        )
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]+", source.lower())
+            if len(token) >= 4 and token not in CONSOLIDATION_STOPWORDS
+        }
+
+    def _duplicate_candidate_groups(self) -> list[ConsolidationCandidateGroup]:
+        exact_text: dict[str, list[str]] = {}
+        same_title: dict[str, list[str]] = {}
+        title_by_id: dict[str, str] = {}
+
+        for memory in self._memories:
+            text_key = normalize_text(memory.text)
+            if text_key:
+                exact_text.setdefault(text_key, []).append(memory.id)
+            title = normalize_metadata_value(memory.metadata.title)
+            if title:
+                same_title.setdefault(title, []).append(memory.id)
+                title_by_id[memory.id] = title
+
+        groups: list[ConsolidationCandidateGroup] = []
+        seen_member_sets: set[tuple[str, ...]] = set()
+
+        for text_key, memory_ids in exact_text.items():
+            if len(memory_ids) < 2:
+                continue
+            member_set = tuple(sorted(memory_ids))
+            seen_member_sets.add(member_set)
+            groups.append(
+                self._consolidation_candidate_group(
+                    "",
+                    "exact_text_duplicate",
+                    memory_ids,
+                    recommended_action="delete_or_merge_duplicates",
+                    signals={
+                        "normalized_text_length": len(text_key),
+                        "metadata_keys": [
+                            list(self._metadata_key(self._memory_by_id[memory_id]))
+                            for memory_id in sorted(memory_ids)
+                        ],
+                    },
+                )
+            )
+
+        for title_key, memory_ids in same_title.items():
+            if len(memory_ids) < 2:
+                continue
+            member_set = tuple(sorted(memory_ids))
+            if member_set in seen_member_sets:
+                continue
+            seen_member_sets.add(member_set)
+            groups.append(
+                self._consolidation_candidate_group(
+                    "",
+                    "same_title",
+                    memory_ids,
+                    recommended_action="review_for_merge_or_metadata_split",
+                    signals={"normalized_title": title_key},
+                )
+            )
+
+        title_ids = sorted(title_by_id)
+        if len(title_ids) >= 2:
+            union_find = UnionFind(title_ids)
+            pair_scores: dict[tuple[str, str], float] = {}
+            for left_index, left_id in enumerate(title_ids):
+                left_title = title_by_id[left_id]
+                for right_id in title_ids[left_index + 1 :]:
+                    right_title = title_by_id[right_id]
+                    if left_title == right_title:
+                        continue
+                    score = lexical_similarity(left_title, right_title)
+                    if score >= 0.84:
+                        union_find.union(left_id, right_id)
+                        pair_scores[(left_id, right_id)] = round(score, 4)
+
+            similar_title_groups: dict[str, list[str]] = {}
+            for memory_id in title_ids:
+                similar_title_groups.setdefault(union_find.find(memory_id), []).append(memory_id)
+
+            for memory_ids in similar_title_groups.values():
+                if len(memory_ids) < 2:
+                    continue
+                member_set = tuple(sorted(memory_ids))
+                if member_set in seen_member_sets:
+                    continue
+                scores = [
+                    score
+                    for (left_id, right_id), score in pair_scores.items()
+                    if left_id in member_set and right_id in member_set
+                ]
+                if not scores:
+                    continue
+                seen_member_sets.add(member_set)
+                groups.append(
+                    self._consolidation_candidate_group(
+                        "",
+                        "similar_title",
+                        memory_ids,
+                        recommended_action="review_for_merge_or_rewrite",
+                        signals={
+                            "minimum_title_similarity": min(scores),
+                            "maximum_title_similarity": max(scores),
+                            "titles": {
+                                memory_id: self._metadata_field_value(
+                                    self._memory_by_id[memory_id], "title"
+                                )
+                                for memory_id in sorted(memory_ids)
+                            },
+                        },
+                    )
+                )
+
+        groups.sort(key=lambda group: (-len(group.member_ids), group.reason, group.member_ids))
+        for index, group in enumerate(groups[:25], start=1):
+            group.group_id = f"duplicate_{index}"
+        return groups[:25]
+
+    def _metadata_variant_candidate_groups(self) -> list[ConsolidationCandidateGroup]:
+        groups: list[ConsolidationCandidateGroup] = []
+        for field_name in ("kind", "subsystem", "workstream", "environment"):
+            values_by_key: dict[str, dict[str, list[str]]] = {}
+            for memory in self._memories:
+                value = self._metadata_field_value(memory, field_name)
+                if value:
+                    key = metadata_variant_key(value)
+                    if key:
+                        values_by_key.setdefault(key, {}).setdefault(value, []).append(memory.id)
+
+            for variant_map in values_by_key.values():
+                if len(variant_map) < 2:
+                    continue
+                variants = sorted(variant_map)
+                memory_ids = [
+                    memory_id
+                    for variant in variants
+                    for memory_id in variant_map[variant]
+                ]
+                groups.append(
+                    self._consolidation_candidate_group(
+                        "",
+                        "metadata_value_variant",
+                        memory_ids,
+                        recommended_action="normalize_metadata_values",
+                        signals={
+                            "field": field_name,
+                            "normalized_tag": metadata_variant_key(variants[0]),
+                            "variants": [
+                                {
+                                    "value": variant,
+                                    "count": len(variant_map[variant]),
+                                    "memory_ids": sorted(variant_map[variant]),
+                                }
+                                for variant in variants
+                            ],
+                        },
+                    )
+                )
+
+        groups.sort(
+            key=lambda group: (
+                str(group.signals.get("field", "")),
+                -len(group.member_ids),
+                group.member_ids,
+            )
+        )
+        for index, group in enumerate(groups[:50], start=1):
+            group.group_id = f"metadata_variant_{index}"
+        return groups[:50]
+
+    def _metadata_cohort_candidate_groups(self) -> list[ConsolidationCandidateGroup]:
+        cohorts: dict[tuple[str, str, str, str], list[str]] = {}
+        for memory in self._memories:
+            key = self._metadata_key(memory)
+            if not any(key):
+                continue
+            cohorts.setdefault(key, []).append(memory.id)
+
+        groups: list[ConsolidationCandidateGroup] = []
+        for key, memory_ids in cohorts.items():
+            if len(memory_ids) < 5:
+                continue
+            example = self._memory_by_id[memory_ids[0]].metadata
+            groups.append(
+                self._consolidation_candidate_group(
+                    "",
+                    "same_metadata_cohort",
+                    memory_ids,
+                    recommended_action="review_cohort_for_overlap",
+                    signals={
+                        "normalized_key": list(key),
+                        "example_metadata": {
+                            "kind": example.kind,
+                            "subsystem": example.subsystem,
+                            "workstream": example.workstream,
+                            "environment": example.environment,
+                        },
+                    },
+                )
+            )
+
+        groups.sort(key=lambda group: (-len(group.member_ids), group.member_ids))
+        for index, group in enumerate(groups[:25], start=1):
+            group.group_id = f"metadata_cohort_{index}"
+        return groups[:25]
+
+    def _recent_burst_candidate_groups(self) -> list[ConsolidationCandidateGroup]:
+        token_buckets: dict[tuple[str, str], list[str]] = {}
+        for memory in self._memories:
+            date_key = memory.created_at[:10]
+            if len(date_key) != 10:
+                continue
+            for token in self._title_tokens(memory):
+                token_buckets.setdefault((date_key, token), []).append(memory.id)
+
+        burst_sets: dict[tuple[str, ...], dict[str, object]] = {}
+        for (date_key, token), memory_ids in token_buckets.items():
+            if len(memory_ids) < 4:
+                continue
+            member_ids = sorted(dict.fromkeys(memory_ids), key=self._consolidation_member_sort_key)
+            member_set = tuple(member_ids)
+            entry = burst_sets.setdefault(
+                member_set,
+                {
+                    "date": date_key,
+                    "tokens": [],
+                    "member_ids": member_ids,
+                },
+            )
+            tokens = entry["tokens"]
+            assert isinstance(tokens, list)
+            tokens.append(token)
+
+        groups: list[ConsolidationCandidateGroup] = []
+        for entry in burst_sets.values():
+            member_ids = entry["member_ids"]
+            tokens = sorted(str(token) for token in entry["tokens"])
+            date_key = str(entry["date"])
+            assert isinstance(member_ids, list)
+            start_at = self._memory_by_id[member_ids[0]].created_at
+            end_at = self._memory_by_id[member_ids[-1]].created_at
+            duration_hours = None
+            start_dt = created_at_datetime(start_at)
+            end_dt = created_at_datetime(end_at)
+            if start_dt is not None and end_dt is not None:
+                duration_hours = round((end_dt - start_dt).total_seconds() / 3600, 2)
+            groups.append(
+                self._consolidation_candidate_group(
+                    "",
+                    "same_day_title_token_burst",
+                    member_ids,
+                    recommended_action="review_burst_for_merge_or_stale_episode_notes",
+                    signals={
+                        "date": date_key,
+                        "primary_token": tokens[0],
+                        "tokens": tokens,
+                        "start_at": start_at,
+                        "end_at": end_at,
+                        "duration_hours": duration_hours,
+                    },
+                )
+            )
+
+        groups.sort(
+            key=lambda group: (
+                -len(group.member_ids),
+                str(group.signals.get("date", "")),
+                str(group.signals.get("primary_token", "")),
+            )
+        )
+        for index, group in enumerate(groups[:25], start=1):
+            group.group_id = f"recent_burst_{index}"
+        return groups[:25]
+
+    def _quality_flag_candidate_groups(self) -> list[ConsolidationCandidateGroup]:
+        flags: dict[str, list[str]] = {}
+        for memory in self._memories:
+            text = memory.text
+            lowered = text.lower()
+            words = word_count(text)
+            if words < 12:
+                flags.setdefault("very_short", []).append(memory.id)
+            if re.search(r"\b(user message|assistant reply|task-notification)\b", lowered):
+                flags.setdefault("raw_transcript_marker", []).append(memory.id)
+            if "this session is being continued from a previous conversation" in lowered:
+                flags.setdefault("session_handoff_blob", []).append(memory.id)
+            if re.search(r"https?://github\.com/[^ \n]+/pull/\d+", text):
+                flags.setdefault("contains_pr_url", []).append(memory.id)
+            if re.search(r"(?<![-\w])[0-9a-f]{7,40}(?![-\w])", lowered):
+                flags.setdefault("contains_commit_sha_like_token", []).append(memory.id)
+            if re.search(r"\b(?:codex|fix|feat|chore|bugfix)/[A-Za-z0-9._#/-]+", text):
+                flags.setdefault("contains_branch_name", []).append(memory.id)
+            if re.search(
+                r"\b(commit(?:ted)? and push|push and merge|use this worktree|leave .* in ai - reviewing)\b",
+                lowered,
+            ):
+                flags.setdefault("one_off_process_directive", []).append(memory.id)
+            has_date = re.search(r"\b(?:20\d\d-\d\d-\d\d|\d{1,2}/\d{1,2}/20\d\d)\b", text)
+            has_status_word = re.search(
+                r"\b(still|today|yesterday|now|leave|status|verified|reproduces|blocks)\b",
+                lowered,
+            )
+            if has_date and has_status_word:
+                flags.setdefault("dated_status_note", []).append(memory.id)
+
+        descriptions = {
+            "very_short": "Memory body has fewer than 12 words.",
+            "raw_transcript_marker": "Memory body looks like raw transcript or task notification content.",
+            "session_handoff_blob": "Memory body looks like a session handoff blob.",
+            "contains_pr_url": "Memory body contains a pull-request URL that may be one-off release state.",
+            "contains_commit_sha_like_token": "Memory body contains a commit-SHA-like token.",
+            "contains_branch_name": "Memory body contains a branch-name-like token.",
+            "one_off_process_directive": "Memory body contains a one-off process directive.",
+            "dated_status_note": "Memory body combines a date with transient status wording.",
+        }
+
+        groups = [
+            self._consolidation_candidate_group(
+                "",
+                flag,
+                memory_ids,
+                recommended_action="review_flagged_memories",
+                signals={"description": descriptions.get(flag, flag), "count": len(memory_ids)},
+            )
+            for flag, memory_ids in sorted(flags.items())
+        ]
+        groups.sort(key=lambda group: (group.reason, group.member_ids))
+        for index, group in enumerate(groups, start=1):
+            group.group_id = f"quality_flag_{index}"
+        return groups
+
+    def _negative_feedback_candidates(self) -> list[ConsolidationFeedbackCandidate]:
+        candidates: list[ConsolidationFeedbackCandidate] = []
+        for memory_id, label_counts in memory_feedback_label_counts(self.project.root).items():
+            memory = self._memory_by_id.get(memory_id)
+            if memory is None:
+                continue
+            negative_count = sum(
+                label_counts.get(label, 0)
+                for label in NEGATIVE_MEMORY_FEEDBACK_LABELS
+            )
+            positive_count = sum(
+                label_counts.get(label, 0)
+                for label in POSITIVE_MEMORY_FEEDBACK_LABELS
+            )
+            if negative_count <= 3 or positive_count > 0:
+                continue
+            member = ConsolidationClusterMember(
+                memory_id=memory.id,
+                text=memory.text,
+                created_at=memory.created_at,
+                metadata=memory.metadata,
+            )
+            candidates.append(
+                ConsolidationFeedbackCandidate(
+                    memory_id=memory.id,
+                    created_at=memory.created_at,
+                    metadata=memory.metadata,
+                    preview=member.preview(),
+                    label_counts=dict(sorted(label_counts.items())),
+                    negative_count=negative_count,
+                    positive_count=positive_count,
+                )
+            )
+        candidates.sort(
+            key=lambda candidate: (
+                -candidate.negative_count,
+                candidate.positive_count,
+                candidate.created_at,
+                candidate.memory_id,
+            )
+        )
+        return candidates
+
+    def _query_timestamps(self) -> list[datetime]:
+        if not self._query_log_path.exists():
+            return []
+        timestamps: list[datetime] = []
+        try:
+            for raw in self._query_log_path.read_text(encoding="utf-8").splitlines():
+                if not raw.strip():
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                value = payload.get("ts")
+                if not isinstance(value, str):
+                    continue
+                parsed = created_at_datetime(value)
+                if parsed is not None:
+                    timestamps.append(parsed)
+        except OSError:
+            return []
+        timestamps.sort()
+        return timestamps
+
+    def _unretrieved_memory_candidates(self) -> list[ConsolidationUnretrievedCandidate]:
+        query_timestamps = self._query_timestamps()
+        if len(query_timestamps) < 1000:
+            return []
+        candidates: list[ConsolidationUnretrievedCandidate] = []
+        for memory in self._memories:
+            if memory.access_count != 0:
+                continue
+            created_at = created_at_datetime(memory.created_at)
+            if created_at is None:
+                continue
+            queries_since_created = sum(
+                1 for timestamp in query_timestamps if timestamp > created_at
+            )
+            if queries_since_created < 1000:
+                continue
+            member = ConsolidationClusterMember(
+                memory_id=memory.id,
+                text=memory.text,
+                created_at=memory.created_at,
+                metadata=memory.metadata,
+            )
+            candidates.append(
+                ConsolidationUnretrievedCandidate(
+                    memory_id=memory.id,
+                    created_at=memory.created_at,
+                    metadata=memory.metadata,
+                    preview=member.preview(),
+                    access_count=memory.access_count,
+                    queries_since_created=queries_since_created,
+                )
+            )
+        candidates.sort(
+            key=lambda candidate: (
+                -candidate.queries_since_created,
+                candidate.created_at,
+                candidate.memory_id,
+            )
+        )
+        return candidates[:25]
+
     def consolidate(self) -> ConsolidationReport:
         threshold = self.config.consolidation_similarity_threshold
         if len(self._memories) < 2:
@@ -979,6 +1555,9 @@ class AgentMemory:
                 clustered_memory_count=0,
                 candidate_pair_count=0,
                 generated_at=utc_now(),
+                metadata_cleanup=self._metadata_variant_candidate_groups(),
+                negative_feedback_memories=self._negative_feedback_candidates(),
+                unretrieved_memories=self._unretrieved_memory_candidates(),
             )
 
         def member_sort_key(memory_id: str) -> tuple[str, str]:
@@ -1073,6 +1652,9 @@ class AgentMemory:
             clustered_memory_count=len(clustered_memory_ids),
             candidate_pair_count=len(unique_pairs),
             generated_at=utc_now(),
+            metadata_cleanup=self._metadata_variant_candidate_groups(),
+            negative_feedback_memories=self._negative_feedback_candidates(),
+            unretrieved_memories=self._unretrieved_memory_candidates(),
         )
 
     def stats(self) -> MemoryStats:

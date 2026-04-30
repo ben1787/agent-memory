@@ -1,6 +1,6 @@
 ---
 name: agent-memory-consolidate
-description: Review Agent Memory similarity clusters and decide whether to keep them or rewrite them into fewer, more orthogonal memories.
+description: Review Agent Memory consolidation candidates and decide whether to keep them or rewrite them into fewer, more orthogonal memories.
 ---
 
 # Agent Memory Consolidate
@@ -15,24 +15,38 @@ Use this skill for the daily Agent Memory consolidation pass.
 agent-memory consolidation-status --json
 ```
 
-2. Fetch the current cluster report:
+2. Fetch the current cleanup worklist:
 
 ```bash
 agent-memory consolidate --json
 ```
 
-3. Review the clusters and decide what to do.
+The top-level command writes the full compact worklist to `.agent-memory/consolidation-report.json` and prints a short JSON run summary with an `agent_handoff` object, `task_status`, `actionable_candidate_count`, `soft_review_candidate_count`, `required_next_command`, `report_path`, and `completion_command`. If `task_complete` is `false`, do not stop after summarizing stdout; run `required_next_command` and review the report before editing memories. The stdout summary is intentionally small so terminal truncation does not hide the next step.
+
+3. Review every relevant section of the report and decide what to do.
 
 Rules:
-- The cluster report is read-only.
-- Clusters are built from cosine similarity `>= 0.92`.
+- The consolidation report is read-only.
+- The default JSON stdout is a compact run summary. The full compact worklist is written to `report_path`; it intentionally does not dump full memory bodies.
+- The JSON includes `agent_handoff` and `instructions` blocks with the full workflow contract, section actions, drilldown commands, and truncation handling. Follow them when the report is handed to you without this skill text.
+- The report has only similarity clusters, standalone metadata tag cleanup, repeatedly negative-rated memories, and sufficiently tried-but-unretrieved memories.
+- To inspect one candidate, run `agent-memory consolidate --json --group <group_id>`.
+- To inspect a specific memory body, run `agent-memory show <memory_id> --json`.
+- Clusters are built from cosine similarity `>= 0.85`.
 - Clusters may overlap.
+- `metadata_cleanup` surfaces similar standalone tag values only; do not assume memory-level redundancy from tag cleanup.
+- `negative_feedback_memories` surfaces memories with more than three negative per-memory ratings and zero positive ratings. Editing such a memory resets its prior feedback.
+- `unretrieved_memories` surfaces memories with zero accesses only after enough later recall queries exist to make non-retrieval meaningful. Count both direct recall calls and prompt-injection recall calls.
+- `clusters`, `metadata_cleanup`, and `negative_feedback_memories` count as actionable cleanup candidates. `unretrieved_memories` is a soft review signal; if it is the only remaining section, review it without assuming edits are required.
+- If you intentionally want the CLI to mark the pass complete when there are no actionable cleanup candidates, use `agent-memory consolidate --json --complete-if-no-actionable`.
 - Do not do contradiction resolution or timestamp-based truth arbitration in this pass.
-- Leave clusters alone if they already look clean and distinct.
-- If a cluster is redundant or messy, replace it with fewer, more orthogonal memories.
+- Leave candidates alone if they already look clean and distinct.
+- If a candidate group is redundant or messy, replace it with fewer, more orthogonal memories.
 - In `dry_run`, do not mutate the memory store.
 
-4. Decide whether to keep each cluster or replace it with fewer, more orthogonal memories.
+4. Decide whether to keep each candidate group or replace it with fewer, more orthogonal memories.
+
+Do not load every memory body in the project. Use the compact worklist to choose a small number of clusters or memory IDs, then drill into only those bodies.
 
 5. Apply the edits immediately using the existing memory-editing commands:
 

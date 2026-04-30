@@ -7,7 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from agent_memory.config import ConfigError, MemoryConfig, load_project
 from agent_memory.engine import AgentMemory, open_memory_with_retry
-from agent_memory.models import MemoryMetadata
+from agent_memory.models import CONSOLIDATION_SECTION_NAMES, MemoryMetadata
 from agent_memory.hooks.common import (
     consolidation_status,
     mark_consolidation_completed,
@@ -162,11 +162,32 @@ def build_server(default_project_root: Path | None = None) -> FastMCP:
         )
 
     @server.tool()
-    def consolidate_memories(project_root: str | None = None) -> dict[str, object]:
-        """Report read-only high-similarity memory clusters without mutating stored memories."""
+    def consolidate_memories(
+        project_root: str | None = None,
+        group_id: str | None = None,
+        section: str | None = None,
+    ) -> dict[str, object]:
+        """Return a compact read-only consolidation worklist, section, or group detail."""
+        if group_id is not None and section is not None:
+            raise ConfigError("Use either group_id or section, not both.")
         memory = _open(project_root, read_only=True)
         try:
-            return memory.consolidate().to_dict()
+            report = memory.consolidate()
+            if group_id is not None:
+                payload = report.group_detail_dict(group_id)
+                if payload is None:
+                    raise ConfigError(f"No consolidation group found with id {group_id!r}.")
+                return payload
+            if section is not None:
+                payload = report.section_detail_dict(section)
+                if payload is None:
+                    expected = ", ".join(CONSOLIDATION_SECTION_NAMES)
+                    raise ConfigError(
+                        f"No consolidation section found with name {section!r}. "
+                        f"Expected one of: {expected}."
+                    )
+                return payload
+            return report.to_summary_dict()
         finally:
             memory.close()
 

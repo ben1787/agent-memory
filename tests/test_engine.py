@@ -10,7 +10,11 @@ from agent_memory.embeddings import FastembedCachePruneResult
 from agent_memory.engine import AgentMemory, open_memory_with_retry, reembed_project
 from agent_memory.metadata_backfill import derive_metadata_from_text
 from agent_memory.models import MemoryMetadata
-from agent_memory.query_log import QUERY_LOG_FILENAME
+from agent_memory.query_log import QUERY_LOG_FILENAME, log_query
+from agent_memory.retrieval_feedback import (
+    record_retrieval_event,
+    record_retrieval_feedback,
+)
 
 
 def make_memory(tmp_path: Path) -> AgentMemory:
@@ -192,9 +196,10 @@ def test_load_project_migrates_legacy_default_config(tmp_path: Path) -> None:
     assert project.config.stored_embedding_dimensions == 384
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 7
+    assert persisted["version"] == 9
     assert persisted["embedding_model"] == "snowflake/snowflake-arctic-embed-m"
     assert persisted["stored_embedding_model"] == "BAAI/bge-small-en-v1.5"
+    assert persisted["consolidation_similarity_threshold"] == 0.85
 
 
 def test_save_and_recall_use_document_and_query_embeddings_when_available(tmp_path: Path) -> None:
@@ -383,6 +388,7 @@ def test_consolidate_reports_duplicates_without_mutating_nodes(tmp_path: Path) -
 def test_consolidate_returns_overlapping_similarity_clusters(tmp_path: Path) -> None:
     config = MemoryConfig(
         embedding_backend="hash",
+        consolidation_similarity_threshold=0.92,
     )
     project = init_project(tmp_path, config=config)
     memory = AgentMemory(project)
@@ -404,6 +410,166 @@ def test_consolidate_returns_overlapping_similarity_clusters(tmp_path: Path) -> 
     assert report.clustered_memory_count == 3
     assert any(len(cluster.member_ids) == 3 for cluster in report.clusters)
     assert len(member_sets) == 3
+
+
+def test_consolidate_reports_deterministic_cleanup_candidates(tmp_path: Path) -> None:
+    memory = make_memory(tmp_path)
+    try:
+        first = memory.save(
+            "Use canonical nested params for execute calls.",
+            metadata=MemoryMetadata(
+                title="Execute dispatcher requires nested params",
+                kind="operational",
+                subsystem="porter-ai",
+                workstream="porter ai ontology",
+                environment="dev",
+            ),
+        ).saved[0].memory_id
+        second = memory.save(
+            "Use canonical nested params for execute calls.",
+            metadata=MemoryMetadata(
+                title="Execute dispatcher requires nested params",
+                kind="operational",
+                subsystem="porter_ai",
+                workstream="porter-ai ontology",
+                environment="dev",
+            ),
+        ).saved[0].memory_id
+        for index in range(5):
+            memory.save(
+                f"Subscription import workflow fact {index} keeps API file handling centralized.",
+                metadata=MemoryMetadata(
+                    title=f"Subscription import workflow fact {index}",
+                    kind="operational",
+                    subsystem="subscriptions",
+                    workstream="subscription import",
+                    environment="dev",
+                ),
+            )
+        report = memory.consolidate()
+        payload = report.to_dict()
+        summary_payload = report.to_summary_dict()
+    finally:
+        memory.close()
+
+    assert payload["candidate_counts"]["clusters"] >= 1
+    assert payload["candidate_counts"]["metadata_cleanup"] >= 1
+    assert payload["instructions"]["section_actions"]["clusters"].startswith(
+        "Review embedding-similar memories."
+    )
+    assert payload["instructions"]["commands"]["section"] == (
+        "agent-memory consolidate --json --section <section>"
+    )
+    assert "duplicate_groups" not in payload
+    assert "metadata_cohorts" not in payload
+    assert "recent_bursts" not in payload
+    assert "quality_flag_groups" not in payload
+    assert any(
+        {first, second}.issubset(set(group["member_ids"]))
+        for group in payload["clusters"]
+    )
+
+    summary_variant = next(
+        group
+        for group in summary_payload["metadata_cleanup"]
+        if group["field"] == "subsystem"
+    )
+    assert summary_variant["values"] == [
+        {"value": "porter-ai", "count": 1},
+        {"value": "porter_ai", "count": 1},
+    ]
+    variant_detail = report.group_detail_dict(summary_variant["group_id"])
+    assert variant_detail is not None
+    assert variant_detail["instructions"]["commands"]["complete"] == (
+        "agent-memory consolidation-complete --json"
+    )
+    assert "member_ids" not in variant_detail
+    assert "sample_members" not in variant_detail
+
+
+def test_consolidate_reports_negative_feedback_and_edit_resets_it(tmp_path: Path) -> None:
+    memory = make_memory(tmp_path)
+    try:
+        memory_id = memory.save(
+            "This stale fact should be reviewed after repeated bad feedback.",
+            metadata=MemoryMetadata(
+                title="Stale feedback candidate",
+                kind="gotcha",
+                subsystem="memory_cli",
+                workstream="consolidation",
+                environment="local",
+            ),
+        ).saved[0].memory_id
+    finally:
+        memory.close()
+
+    for index in range(4):
+        event_id = record_retrieval_event(
+            tmp_path,
+            query=f"query {index}",
+            matches=[
+                {
+                    "alias": "A",
+                    "memory_id": memory_id,
+                    "query_similarity": 1.0,
+                    "score": 1.0,
+                    "text": "preview",
+                }
+            ],
+        )
+        assert event_id is not None
+        record_retrieval_feedback(
+            tmp_path,
+            event_id=event_id,
+            overall=None,
+            memory_feedback=[("A", "wrong")],
+            why=None,
+            better=None,
+            missing=None,
+            note=None,
+        )
+
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        report = memory.consolidate()
+        assert [candidate.memory_id for candidate in report.negative_feedback_memories] == [
+            memory_id
+        ]
+        memory.edit(memory_id, "Rewritten durable fact after feedback.")
+        report_after_edit = memory.consolidate()
+    finally:
+        memory.close()
+
+    assert report_after_edit.negative_feedback_memories == []
+
+
+def test_consolidate_reports_unretrieved_after_enough_later_queries(tmp_path: Path) -> None:
+    memory = make_memory(tmp_path)
+    try:
+        memory_id = memory.save(
+            "Rarely useful local setup detail.",
+            metadata=MemoryMetadata(
+                title="Never retrieved candidate",
+                kind="operational",
+                subsystem="local-dev",
+                workstream="consolidation",
+                environment="local",
+            ),
+        ).saved[0].memory_id
+        for index in range(1000):
+            log_query(
+                tmp_path / ".agent-memory" / QUERY_LOG_FILENAME,
+                f"later query {index}",
+                method="recall",
+            )
+        report = memory.consolidate()
+    finally:
+        memory.close()
+
+    assert [candidate.memory_id for candidate in report.unretrieved_memories] == [
+        memory_id
+    ]
+    assert report.unretrieved_memories[0].queries_since_created == 1000
 
 
 def test_save_rejects_overlong_memory(tmp_path: Path) -> None:

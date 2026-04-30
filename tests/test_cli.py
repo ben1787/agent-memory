@@ -14,6 +14,7 @@ from agent_memory.config import MemoryConfig, init_project
 from agent_memory.engine import open_memory_with_retry
 from agent_memory.integration import IntegrationResult
 from agent_memory.models import MemoryMetadata
+from agent_memory.query_log import QUERY_LOG_FILENAME, log_query
 from agent_memory.retrieval_feedback import record_retrieval_event
 
 
@@ -985,6 +986,171 @@ def test_consolidation_status_and_complete_command(tmp_path: Path) -> None:
     assert completed_payload["is_completed_today"] is True
     assert completed_payload["is_due_today"] is False
     assert completed_payload["last_consolidation_date"] == completed_payload["today"]
+
+
+def test_consolidate_json_is_compact_with_group_drilldown(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        for _ in range(2):
+            memory.save(
+                "Use canonical nested params for execute calls.",
+                metadata=MemoryMetadata(
+                    title="Execute dispatcher requires nested params",
+                    kind="operational",
+                    subsystem="porter-ai",
+                    workstream="ontology",
+                    environment="dev",
+                ),
+            )
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["consolidate", "--cwd", str(tmp_path), "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert "clusters" not in payload
+    assert payload["task_status"] == "action_required_not_complete"
+    assert payload["task_complete"] is False
+    assert payload["actionable_candidate_count"] == 1
+    assert payload["soft_review_candidate_count"] == 0
+    assert payload["completion_recommendation"] == "read_report_then_review_actionable_candidates"
+    assert payload["agent_handoff"]["goal"].startswith(
+        "Complete the Agent Memory consolidation pass"
+    )
+    assert payload["agent_handoff"]["required_next_command"] == payload["report_read_command"]
+    assert payload["agent_handoff"]["do_not_stop_until"].endswith(
+        "run completion_command."
+    )
+    assert payload["completion_command"] == "agent-memory consolidation-complete --json"
+    assert payload["calling_agent_task"].startswith("Do not stop after this summary.")
+    assert payload["report_description"].startswith("Full compact consolidation worklist.")
+    assert "agent_handoff" not in payload["instructions"]
+    assert payload["instructions"]["calling_agent_task"].startswith(
+        "Complete the consolidation pass"
+    )
+    assert payload["instructions"]["commands"]["group"] == (
+        "agent-memory consolidate --json --group <group_id>"
+    )
+    assert "report_path" in payload["instructions"]["output_handling"][0]
+    report_path = Path(payload["report_path"])
+    assert report_path == tmp_path / ".agent-memory" / "consolidation-report.json"
+    assert payload["report_read_command"].endswith(".agent-memory/consolidation-report.json")
+    assert payload["required_next_command"] == payload["report_read_command"]
+    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report_payload["agent_handoff"]["assumption"].startswith(
+        "The caller may know nothing"
+    )
+    assert "duplicate_groups" not in report_payload
+    assert "metadata_cohorts" not in report_payload
+    group = report_payload["clusters"][0]
+    assert group["reason"] == "embedding_similarity_cluster"
+    assert group["member_count"] == 2
+    assert "text" not in group["members"][0]
+    assert "preview" not in group["members"][0]
+
+    detail = runner.invoke(
+        app,
+        ["consolidate", "--cwd", str(tmp_path), "--group", group["group_id"], "--json"],
+    )
+    assert detail.exit_code == 0, detail.stdout
+    detail_payload = json.loads(detail.stdout)
+    assert detail_payload["instructions"]["commands"]["show"] == (
+        "agent-memory show <memory_id> --json"
+    )
+    assert detail_payload["group_id"] == group["group_id"]
+    assert detail_payload["member_count"] == 2
+    assert len(detail_payload["member_ids"]) == 2
+    assert "text" not in detail_payload["members"][0]
+    assert "preview" in detail_payload["members"][0]
+
+
+def test_consolidate_can_complete_when_no_actionable_candidates(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        memory.save(
+            "Single distinct memory without cleanup candidates.",
+            metadata=MemoryMetadata(
+                title="Single memory",
+                kind="operational",
+                subsystem="memory_cli",
+                workstream="consolidation",
+                environment="local",
+            ),
+        )
+    finally:
+        memory.close()
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["consolidate", "--cwd", str(tmp_path), "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["task_status"] == "ready_to_complete_no_candidates"
+    assert payload["task_complete"] is False
+    assert payload["actionable_candidate_count"] == 0
+    assert payload["soft_review_candidate_count"] == 0
+    assert payload["completion_recommendation"] == "complete_now_no_candidates"
+
+    completed = runner.invoke(
+        app,
+        [
+            "consolidate",
+            "--cwd",
+            str(tmp_path),
+            "--json",
+            "--complete-if-no-actionable",
+        ],
+    )
+    assert completed.exit_code == 0, completed.stdout
+    completed_payload = json.loads(completed.stdout)
+    assert completed_payload["task_status"] == "completed_no_actionable_candidates"
+    assert completed_payload["task_complete"] is True
+    assert completed_payload["required_next_command"] is None
+    assert completed_payload["completion_command"] is None
+    assert completed_payload["completion_result"]["status"] == "completed"
+
+    status = runner.invoke(app, ["consolidation-status", "--cwd", str(tmp_path), "--json"])
+    assert status.exit_code == 0, status.stdout
+    status_payload = json.loads(status.stdout)
+    assert status_payload["is_completed_today"] is True
+
+
+def test_consolidate_treats_unretrieved_only_as_soft_review(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        memory.save(
+            "Rare local setup detail that has not been retrieved.",
+            metadata=MemoryMetadata(
+                title="Never retrieved CLI candidate",
+                kind="operational",
+                subsystem="memory_cli",
+                workstream="consolidation",
+                environment="local",
+            ),
+        )
+        for index in range(1000):
+            log_query(
+                tmp_path / ".agent-memory" / QUERY_LOG_FILENAME,
+                f"later query {index}",
+                method="recall",
+            )
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["consolidate", "--cwd", str(tmp_path), "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["task_status"] == "review_required_no_cleanup_candidates"
+    assert payload["task_complete"] is False
+    assert payload["actionable_candidate_count"] == 0
+    assert payload["soft_review_candidate_count"] == 1
+    assert payload["completion_recommendation"] == (
+        "read_report_then_complete_if_no_soft_review_items_need_changes"
+    )
 
 
 def test_undo_command_reverts_save(tmp_path: Path) -> None:

@@ -20,6 +20,8 @@ MEMORY_FEEDBACK_LABELS = frozenset(
     }
 )
 OVERALL_FEEDBACK_LABELS = frozenset({"helpful", "mixed", "irrelevant"})
+POSITIVE_MEMORY_FEEDBACK_LABELS = frozenset({"helpful", "partial"})
+NEGATIVE_MEMORY_FEEDBACK_LABELS = frozenset({"irrelevant", "stale", "wrong"})
 
 _MEMORY_FEEDBACK_WEIGHTS = {
     "helpful": 1.0,
@@ -253,13 +255,43 @@ def record_retrieval_feedback(
     return payload
 
 
-def feedback_bias_by_memory(project_root: Path) -> dict[str, float]:
-    """Aggregate historical per-memory feedback into a small bounded ranking bias."""
+def reset_memory_feedback(
+    project_root: Path,
+    memory_ids: list[str],
+    *,
+    reason: str,
+) -> dict[str, Any] | None:
+    cleaned_ids = sorted({memory_id for memory_id in memory_ids if memory_id.strip()})
+    if not cleaned_ids:
+        return None
+    payload = {
+        "ts": _utc_now_iso(),
+        "type": "memory_feedback_reset",
+        "memory_ids": cleaned_ids,
+        "reason": reason,
+    }
     path = _log_path(project_root, RETRIEVAL_FEEDBACK_LOG_FILENAME)
-    totals: dict[str, float] = {}
-    counts: dict[str, int] = {}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        return None
+    return payload
+
+
+def memory_feedback_label_counts(project_root: Path) -> dict[str, dict[str, int]]:
+    path = _log_path(project_root, RETRIEVAL_FEEDBACK_LOG_FILENAME)
+    counts: dict[str, dict[str, int]] = {}
 
     for entry in _iter_jsonl(path):
+        if entry.get("type") == "memory_feedback_reset":
+            memory_ids = entry.get("memory_ids")
+            if isinstance(memory_ids, list):
+                for memory_id in memory_ids:
+                    if isinstance(memory_id, str):
+                        counts.pop(memory_id, None)
+            continue
         items = entry.get("memory_feedback")
         if not isinstance(items, list):
             continue
@@ -270,11 +302,26 @@ def feedback_bias_by_memory(project_root: Path) -> dict[str, float]:
             label = item.get("label")
             if not isinstance(memory_id, str) or not isinstance(label, str):
                 continue
+            if label not in MEMORY_FEEDBACK_LABELS:
+                continue
+            label_counts = counts.setdefault(memory_id, {})
+            label_counts[label] = label_counts.get(label, 0) + 1
+
+    return counts
+
+
+def feedback_bias_by_memory(project_root: Path) -> dict[str, float]:
+    """Aggregate historical per-memory feedback into a small bounded ranking bias."""
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+
+    for memory_id, label_counts in memory_feedback_label_counts(project_root).items():
+        for label, count in label_counts.items():
             weight = _MEMORY_FEEDBACK_WEIGHTS.get(label)
             if weight is None:
                 continue
-            totals[memory_id] = totals.get(memory_id, 0.0) + weight
-            counts[memory_id] = counts.get(memory_id, 0) + 1
+            totals[memory_id] = totals.get(memory_id, 0.0) + (weight * count)
+            counts[memory_id] = counts.get(memory_id, 0) + count
 
     biases: dict[str, float] = {}
     for memory_id, total in totals.items():
