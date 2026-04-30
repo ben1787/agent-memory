@@ -547,7 +547,7 @@ def test_consolidate_reports_unretrieved_after_enough_later_queries(tmp_path: Pa
                 environment="local",
             ),
         ).saved[0].memory_id
-        for index in range(50):
+        for index in range(100):
             log_query(
                 tmp_path / ".agent-memory" / QUERY_LOG_FILENAME,
                 f"later query {index}",
@@ -560,7 +560,7 @@ def test_consolidate_reports_unretrieved_after_enough_later_queries(tmp_path: Pa
     assert [candidate.memory_id for candidate in report.unretrieved_memories] == [
         memory_id
     ]
-    assert report.unretrieved_memories[0].queries_since_created == 50
+    assert report.unretrieved_memories[0].queries_since_created == 100
 
 
 def test_save_rejects_overlong_memory(tmp_path: Path) -> None:

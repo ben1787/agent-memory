@@ -433,7 +433,7 @@ class ConsolidationReport:
             "generated_at": self.generated_at,
             "candidate_counts": self.candidate_counts(),
             "unretrieved_policy": {
-                "minimum_queries_since_created": 50,
+                "minimum_queries_since_created": 100,
                 "description": (
                     "Only memories with access_count=0 and at least this many later "
                     "recall queries are surfaced. The count intentionally includes "
