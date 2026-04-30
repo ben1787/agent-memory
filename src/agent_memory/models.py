@@ -4,6 +4,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
+CONSOLIDATION_SECTION_NAMES = (
+    "clusters",
+    "metadata_cleanup",
+    "negative_feedback_memories",
+    "unretrieved_memories",
+)
+
+
 @dataclass(slots=True)
 class MemoryMetadata:
     title: str | None = None
@@ -195,6 +203,20 @@ class ConsolidationClusterMember:
         payload["preview"] = self.preview()
         return payload
 
+    def to_compact_dict(self, *, include_preview: bool = False) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "memory_id": self.memory_id,
+            "created_at": self.created_at,
+            "title": self.metadata.title,
+            "kind": self.metadata.kind,
+            "subsystem": self.metadata.subsystem,
+            "workstream": self.metadata.workstream,
+            "environment": self.metadata.environment,
+        }
+        if include_preview:
+            payload["preview"] = self.preview()
+        return payload
+
 
 @dataclass(slots=True)
 class ConsolidationClusterEdge:
@@ -227,6 +249,27 @@ class ConsolidationCluster:
             "max_similarity": self.max_similarity,
         }
 
+    def to_summary_dict(
+        self,
+        *,
+        sample_member_limit: int = 5,
+        include_preview: bool = False,
+    ) -> dict[str, object]:
+        return {
+            "group_id": self.cluster_id,
+            "reason": "embedding_similarity_cluster",
+            "recommended_action": "merge_or_delete_if_not_independently_useful",
+            "member_count": len(self.member_ids),
+            "member_ids": self.member_ids,
+            "members": [
+                member.to_compact_dict(include_preview=include_preview)
+                for member in self.members[:sample_member_limit]
+            ],
+            "average_similarity": self.average_similarity,
+            "max_similarity": self.max_similarity,
+            "pair_edge_count": len(self.pair_edges),
+        }
+
 
 @dataclass(slots=True)
 class ConsolidationCandidateGroup:
@@ -247,6 +290,116 @@ class ConsolidationCandidateGroup:
             "signals": self.signals,
         }
 
+    def to_summary_dict(
+        self,
+        *,
+        member_id_limit: int = 0,
+        sample_member_limit: int = 0,
+        include_signal_memory_ids: bool = False,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "group_id": self.group_id,
+            "reason": self.reason,
+            "recommended_action": self.recommended_action,
+            "member_count": len(self.member_ids),
+            "signals": _compact_consolidation_signals(
+                self.signals,
+                include_memory_ids=include_signal_memory_ids,
+            ),
+        }
+        if member_id_limit > 0:
+            payload["member_ids_preview"] = self.member_ids[:member_id_limit]
+            payload["omitted_member_count"] = max(0, len(self.member_ids) - member_id_limit)
+        if sample_member_limit > 0:
+            payload["sample_members"] = [
+                {
+                    "memory_id": member.memory_id,
+                    "created_at": member.created_at,
+                    "metadata": member.metadata.to_dict(),
+                    "preview": member.preview(),
+                }
+                for member in self.members[:sample_member_limit]
+            ]
+        return payload
+
+    def to_metadata_cleanup_dict(self) -> dict[str, object]:
+        variants = self.signals.get("variants")
+        if not isinstance(variants, list):
+            variants = []
+        values: list[dict[str, object]] = []
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            value = variant.get("value")
+            count = variant.get("count")
+            if isinstance(value, str) and isinstance(count, int):
+                values.append({"value": value, "count": count})
+        canonical = None
+        if values:
+            canonical = sorted(values, key=lambda item: (-int(item["count"]), str(item["value"])))[0]["value"]
+        return {
+            "group_id": self.group_id,
+            "field": self.signals.get("field"),
+            "normalized_tag": self.signals.get("normalized_tag"),
+            "recommended_action": "normalize_if_tags_mean_the_same_standalone",
+            "suggested_canonical_value": canonical,
+            "value_count": len(values),
+            "affected_memory_count": len(self.member_ids),
+            "values": values,
+        }
+
+
+@dataclass(slots=True)
+class ConsolidationFeedbackCandidate:
+    memory_id: str
+    created_at: str
+    metadata: MemoryMetadata
+    preview: str
+    label_counts: dict[str, int]
+    negative_count: int
+    positive_count: int
+
+    def to_summary_dict(self) -> dict[str, object]:
+        return {
+            "memory_id": self.memory_id,
+            "created_at": self.created_at,
+            "title": self.metadata.title,
+            "kind": self.metadata.kind,
+            "subsystem": self.metadata.subsystem,
+            "workstream": self.metadata.workstream,
+            "environment": self.metadata.environment,
+            "preview": self.preview,
+            "label_counts": self.label_counts,
+            "negative_count": self.negative_count,
+            "positive_count": self.positive_count,
+            "recommended_action": "rewrite_or_delete_then_feedback_resets_on_edit",
+        }
+
+
+@dataclass(slots=True)
+class ConsolidationUnretrievedCandidate:
+    memory_id: str
+    created_at: str
+    metadata: MemoryMetadata
+    preview: str
+    access_count: int
+    queries_since_created: int
+
+    def to_summary_dict(self) -> dict[str, object]:
+        return {
+            "memory_id": self.memory_id,
+            "created_at": self.created_at,
+            "title": self.metadata.title,
+            "kind": self.metadata.kind,
+            "subsystem": self.metadata.subsystem,
+            "workstream": self.metadata.workstream,
+            "environment": self.metadata.environment,
+            "preview": self.preview,
+            "access_count": self.access_count,
+            "queries_since_created": self.queries_since_created,
+            "recommended_action": "review_for_low_utility_or_bad_tags",
+        }
+
 
 @dataclass(slots=True)
 class ConsolidationReport:
@@ -256,38 +409,141 @@ class ConsolidationReport:
     clustered_memory_count: int
     candidate_pair_count: int
     generated_at: str
-    duplicate_groups: list[ConsolidationCandidateGroup] = field(default_factory=list)
-    metadata_variant_groups: list[ConsolidationCandidateGroup] = field(default_factory=list)
-    metadata_cohorts: list[ConsolidationCandidateGroup] = field(default_factory=list)
-    recent_bursts: list[ConsolidationCandidateGroup] = field(default_factory=list)
-    quality_flag_groups: list[ConsolidationCandidateGroup] = field(default_factory=list)
+    metadata_cleanup: list[ConsolidationCandidateGroup] = field(default_factory=list)
+    negative_feedback_memories: list[ConsolidationFeedbackCandidate] = field(default_factory=list)
+    unretrieved_memories: list[ConsolidationUnretrievedCandidate] = field(default_factory=list)
+
+    def candidate_counts(self) -> dict[str, int]:
+        return {
+            "clusters": len(self.clusters),
+            "metadata_cleanup": len(self.metadata_cleanup),
+            "negative_feedback_memories": len(self.negative_feedback_memories),
+            "unretrieved_memories": len(self.unretrieved_memories),
+        }
 
     def to_dict(self) -> dict[str, object]:
-        cleanup_candidate_counts = {
-            "duplicate_groups": len(self.duplicate_groups),
-            "metadata_variant_groups": len(self.metadata_variant_groups),
-            "metadata_cohorts": len(self.metadata_cohorts),
-            "recent_bursts": len(self.recent_bursts),
-            "quality_flag_groups": len(self.quality_flag_groups),
-        }
+        return self.to_summary_dict()
+
+    def to_summary_dict(self) -> dict[str, object]:
         return {
             "threshold": self.threshold,
-            "cleanup_candidate_counts": cleanup_candidate_counts,
-            "clusters": [cluster.to_dict() for cluster in self.clusters],
             "total_memories": self.total_memories,
             "clustered_memory_count": self.clustered_memory_count,
             "candidate_pair_count": self.candidate_pair_count,
             "generated_at": self.generated_at,
-            "duplicate_groups": [group.to_dict() for group in self.duplicate_groups],
-            "metadata_variant_groups": [
-                group.to_dict() for group in self.metadata_variant_groups
+            "candidate_counts": self.candidate_counts(),
+            "unretrieved_policy": {
+                "minimum_queries_since_created": 50,
+                "description": (
+                    "Only memories with access_count=0 and at least this many later "
+                    "recall queries are surfaced. The count intentionally includes "
+                    "both direct recall calls and prompt-injection recall calls."
+                ),
+            },
+            "clusters": [
+                cluster.to_summary_dict()
+                for cluster in self.clusters
             ],
-            "metadata_cohorts": [group.to_dict() for group in self.metadata_cohorts],
-            "recent_bursts": [group.to_dict() for group in self.recent_bursts],
-            "quality_flag_groups": [
-                group.to_dict() for group in self.quality_flag_groups
+            "metadata_cleanup": [
+                group.to_metadata_cleanup_dict()
+                for group in self.metadata_cleanup
+            ],
+            "negative_feedback_memories": [
+                candidate.to_summary_dict()
+                for candidate in self.negative_feedback_memories
+            ],
+            "unretrieved_memories": [
+                candidate.to_summary_dict()
+                for candidate in self.unretrieved_memories
             ],
         }
+
+    def section_detail_dict(self, section_name: str) -> dict[str, object] | None:
+        if section_name == "clusters":
+            return {
+                "section": section_name,
+                "group_count": len(self.clusters),
+                "groups": [
+                    cluster.to_summary_dict()
+                    for cluster in self.clusters
+                ],
+            }
+        if section_name == "metadata_cleanup":
+            return {
+                "section": section_name,
+                "group_count": len(self.metadata_cleanup),
+                "groups": [
+                    group.to_metadata_cleanup_dict()
+                    for group in self.metadata_cleanup
+                ],
+            }
+        if section_name == "negative_feedback_memories":
+            return {
+                "section": section_name,
+                "memory_count": len(self.negative_feedback_memories),
+                "memories": [
+                    candidate.to_summary_dict()
+                    for candidate in self.negative_feedback_memories
+                ],
+            }
+        if section_name == "unretrieved_memories":
+            return {
+                "section": section_name,
+                "memory_count": len(self.unretrieved_memories),
+                "memories": [
+                    candidate.to_summary_dict()
+                    for candidate in self.unretrieved_memories
+                ],
+            }
+        return None
+
+    def group_detail_dict(self, group_id: str) -> dict[str, object] | None:
+        for cluster in self.clusters:
+            if cluster.cluster_id != group_id:
+                continue
+            payload = cluster.to_summary_dict(
+                sample_member_limit=10,
+                include_preview=True,
+            )
+            payload["section"] = "clusters"
+            payload["pair_edges"] = [edge.to_dict() for edge in cluster.pair_edges]
+            return payload
+        for group in self.metadata_cleanup:
+            if group.group_id == group_id:
+                payload = group.to_metadata_cleanup_dict()
+                payload["section"] = "metadata_cleanup"
+                return payload
+        return None
+
+
+def _compact_consolidation_signals(
+    value: object,
+    *,
+    include_memory_ids: bool = False,
+) -> object:
+    if isinstance(value, dict):
+        compacted: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "memory_ids" and isinstance(item, list):
+                if include_memory_ids:
+                    compacted["memory_ids"] = item
+                else:
+                    compacted["memory_id_count"] = len(item)
+                continue
+            compacted[key] = _compact_consolidation_signals(
+                item,
+                include_memory_ids=include_memory_ids,
+            )
+        return compacted
+    if isinstance(value, list):
+        return [
+            _compact_consolidation_signals(
+                item,
+                include_memory_ids=include_memory_ids,
+            )
+            for item in value
+        ]
+    return value
 
 
 @dataclass(slots=True)

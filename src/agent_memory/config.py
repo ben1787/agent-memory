@@ -24,7 +24,7 @@ def _linked_roots_path(root: Path) -> Path:
     return root / APP_DIR_NAME / LINKED_ROOTS_FILENAME
 
 
-CURRENT_CONFIG_VERSION = 7
+CURRENT_CONFIG_VERSION = 8
 LEGACY_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 LEGACY_DEFAULT_DIMENSIONS = 384
 DEFAULT_MODEL = "snowflake/snowflake-arctic-embed-m"
@@ -50,7 +50,7 @@ class MemoryConfig:
     duplicate_threshold: float = 0.97
     overlap_threshold: float = 0.90
     lexical_duplicate_threshold: float = 0.95
-    consolidation_similarity_threshold: float = 0.92
+    consolidation_similarity_threshold: float = 0.8
 
     def __post_init__(self) -> None:
         if self.stored_embedding_backend is None:
@@ -111,6 +111,11 @@ class MemoryConfig:
         data.setdefault("auto_upgrade", DEFAULT_AUTO_UPGRADE)
 
         if version < CURRENT_CONFIG_VERSION:
+            if (
+                version < 8
+                and float(data.get("consolidation_similarity_threshold", 0.92)) == 0.92
+            ):
+                data["consolidation_similarity_threshold"] = 0.8
             if (
                 original_backend == "fastembed"
                 and original_model == LEGACY_DEFAULT_MODEL

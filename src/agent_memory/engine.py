@@ -33,8 +33,10 @@ from agent_memory.models import (
     ConsolidationCandidateGroup,
     ConsolidationCluster,
     ConsolidationClusterEdge,
+    ConsolidationFeedbackCandidate,
     ConsolidationClusterMember,
     ConsolidationReport,
+    ConsolidationUnretrievedCandidate,
     MemoryCluster,
     MemoryHit,
     MemoryMetadata,
@@ -57,6 +59,12 @@ from agent_memory.operations_log import (
     OperationsLog,
 )
 from agent_memory.query_log import QUERY_LOG_FILENAME, log_query
+from agent_memory.retrieval_feedback import (
+    NEGATIVE_MEMORY_FEEDBACK_LABELS,
+    POSITIVE_MEMORY_FEEDBACK_LABELS,
+    memory_feedback_label_counts,
+    reset_memory_feedback,
+)
 from agent_memory.store import GraphStore
 from agent_memory.write_lock import ProjectWriteLock
 
@@ -557,6 +565,11 @@ class AgentMemory:
                 before=before_payload,
                 after=_record_to_payload(updated),
             )
+            reset_memory_feedback(
+                self.project.root,
+                [existing.id],
+                reason="memory_edited",
+            )
         return updated
 
     def edit_many(
@@ -661,6 +674,12 @@ class AgentMemory:
                     memory_id=existing.id, status="changed", record=updated
                 )
             self._reload_cache()
+            if record_in_log:
+                reset_memory_feedback(
+                    self.project.root,
+                    [existing.id for _, existing, *_ in plans],
+                    reason="memory_edited",
+                )
 
         return [outcome for outcome in outcomes if outcome is not None]
 
@@ -1232,6 +1251,7 @@ class AgentMemory:
                         recommended_action="normalize_metadata_values",
                         signals={
                             "field": field_name,
+                            "normalized_tag": metadata_variant_key(variants[0]),
                             "variants": [
                                 {
                                     "value": variant,
@@ -1416,6 +1436,115 @@ class AgentMemory:
             group.group_id = f"quality_flag_{index}"
         return groups
 
+    def _negative_feedback_candidates(self) -> list[ConsolidationFeedbackCandidate]:
+        candidates: list[ConsolidationFeedbackCandidate] = []
+        for memory_id, label_counts in memory_feedback_label_counts(self.project.root).items():
+            memory = self._memory_by_id.get(memory_id)
+            if memory is None:
+                continue
+            negative_count = sum(
+                label_counts.get(label, 0)
+                for label in NEGATIVE_MEMORY_FEEDBACK_LABELS
+            )
+            positive_count = sum(
+                label_counts.get(label, 0)
+                for label in POSITIVE_MEMORY_FEEDBACK_LABELS
+            )
+            if negative_count <= 3 or positive_count > 0:
+                continue
+            member = ConsolidationClusterMember(
+                memory_id=memory.id,
+                text=memory.text,
+                created_at=memory.created_at,
+                metadata=memory.metadata,
+            )
+            candidates.append(
+                ConsolidationFeedbackCandidate(
+                    memory_id=memory.id,
+                    created_at=memory.created_at,
+                    metadata=memory.metadata,
+                    preview=member.preview(),
+                    label_counts=dict(sorted(label_counts.items())),
+                    negative_count=negative_count,
+                    positive_count=positive_count,
+                )
+            )
+        candidates.sort(
+            key=lambda candidate: (
+                -candidate.negative_count,
+                candidate.positive_count,
+                candidate.created_at,
+                candidate.memory_id,
+            )
+        )
+        return candidates
+
+    def _query_timestamps(self) -> list[datetime]:
+        if not self._query_log_path.exists():
+            return []
+        timestamps: list[datetime] = []
+        try:
+            for raw in self._query_log_path.read_text(encoding="utf-8").splitlines():
+                if not raw.strip():
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                value = payload.get("ts")
+                if not isinstance(value, str):
+                    continue
+                parsed = created_at_datetime(value)
+                if parsed is not None:
+                    timestamps.append(parsed)
+        except OSError:
+            return []
+        timestamps.sort()
+        return timestamps
+
+    def _unretrieved_memory_candidates(self) -> list[ConsolidationUnretrievedCandidate]:
+        query_timestamps = self._query_timestamps()
+        if len(query_timestamps) < 50:
+            return []
+        candidates: list[ConsolidationUnretrievedCandidate] = []
+        for memory in self._memories:
+            if memory.access_count != 0:
+                continue
+            created_at = created_at_datetime(memory.created_at)
+            if created_at is None:
+                continue
+            queries_since_created = sum(
+                1 for timestamp in query_timestamps if timestamp > created_at
+            )
+            if queries_since_created < 50:
+                continue
+            member = ConsolidationClusterMember(
+                memory_id=memory.id,
+                text=memory.text,
+                created_at=memory.created_at,
+                metadata=memory.metadata,
+            )
+            candidates.append(
+                ConsolidationUnretrievedCandidate(
+                    memory_id=memory.id,
+                    created_at=memory.created_at,
+                    metadata=memory.metadata,
+                    preview=member.preview(),
+                    access_count=memory.access_count,
+                    queries_since_created=queries_since_created,
+                )
+            )
+        candidates.sort(
+            key=lambda candidate: (
+                -candidate.queries_since_created,
+                candidate.created_at,
+                candidate.memory_id,
+            )
+        )
+        return candidates[:25]
+
     def consolidate(self) -> ConsolidationReport:
         threshold = self.config.consolidation_similarity_threshold
         if len(self._memories) < 2:
@@ -1426,6 +1555,9 @@ class AgentMemory:
                 clustered_memory_count=0,
                 candidate_pair_count=0,
                 generated_at=utc_now(),
+                metadata_cleanup=self._metadata_variant_candidate_groups(),
+                negative_feedback_memories=self._negative_feedback_candidates(),
+                unretrieved_memories=self._unretrieved_memory_candidates(),
             )
 
         def member_sort_key(memory_id: str) -> tuple[str, str]:
@@ -1513,11 +1645,6 @@ class AgentMemory:
             for cluster in clusters
             for member_id in cluster.member_ids
         }
-        duplicate_groups = self._duplicate_candidate_groups()
-        metadata_variant_groups = self._metadata_variant_candidate_groups()
-        metadata_cohorts = self._metadata_cohort_candidate_groups()
-        recent_bursts = self._recent_burst_candidate_groups()
-        quality_flag_groups = self._quality_flag_candidate_groups()
         return ConsolidationReport(
             threshold=threshold,
             clusters=clusters,
@@ -1525,11 +1652,9 @@ class AgentMemory:
             clustered_memory_count=len(clustered_memory_ids),
             candidate_pair_count=len(unique_pairs),
             generated_at=utc_now(),
-            duplicate_groups=duplicate_groups,
-            metadata_variant_groups=metadata_variant_groups,
-            metadata_cohorts=metadata_cohorts,
-            recent_bursts=recent_bursts,
-            quality_flag_groups=quality_flag_groups,
+            metadata_cleanup=self._metadata_variant_candidate_groups(),
+            negative_feedback_memories=self._negative_feedback_candidates(),
+            unretrieved_memories=self._unretrieved_memory_candidates(),
         )
 
     def stats(self) -> MemoryStats:

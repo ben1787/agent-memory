@@ -25,19 +25,23 @@ agent-memory consolidate --json
 
 Rules:
 - The consolidation report is read-only.
-- Clusters are built from cosine similarity `>= 0.92`.
+- The default JSON is a compact worklist. It intentionally does not dump full memory bodies.
+- The report has only similarity clusters, standalone metadata tag cleanup, repeatedly negative-rated memories, and sufficiently tried-but-unretrieved memories.
+- To inspect one candidate, run `agent-memory consolidate --json --group <group_id>`.
+- To inspect a specific memory body, run `agent-memory show <memory_id> --json`.
+- Clusters are built from cosine similarity `>= 0.8`.
 - Clusters may overlap.
-- `duplicate_groups` surfaces exact text duplicates, same titles, and very similar titles.
-- `metadata_variant_groups` surfaces metadata spelling variants such as hyphen/underscore/case/plural drift.
-- `metadata_cohorts` surfaces larger same-metadata groups worth scanning together.
-- `recent_bursts` surfaces same-day topic bursts that often contain episode notes or redundant saves.
-- `quality_flag_groups` surfaces deterministic risk flags such as very short memories, raw transcript markers, PR URLs, commit-like tokens, branch names, one-off process directives, and dated status notes.
+- `metadata_cleanup` surfaces similar standalone tag values only; do not assume memory-level redundancy from tag cleanup.
+- `negative_feedback_memories` surfaces memories with more than three negative per-memory ratings and zero positive ratings. Editing such a memory resets its prior feedback.
+- `unretrieved_memories` surfaces memories with zero accesses only after enough later recall queries exist to make non-retrieval meaningful. Count both direct recall calls and prompt-injection recall calls.
 - Do not do contradiction resolution or timestamp-based truth arbitration in this pass.
 - Leave candidates alone if they already look clean and distinct.
 - If a candidate group is redundant or messy, replace it with fewer, more orthogonal memories.
 - In `dry_run`, do not mutate the memory store.
 
 4. Decide whether to keep each candidate group or replace it with fewer, more orthogonal memories.
+
+Do not load every memory body in the project. Use the compact worklist to choose a small number of clusters or memory IDs, then drill into only those bodies.
 
 5. Apply the edits immediately using the existing memory-editing commands:
 

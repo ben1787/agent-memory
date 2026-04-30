@@ -987,6 +987,49 @@ def test_consolidation_status_and_complete_command(tmp_path: Path) -> None:
     assert completed_payload["last_consolidation_date"] == completed_payload["today"]
 
 
+def test_consolidate_json_is_compact_with_group_drilldown(tmp_path: Path) -> None:
+    init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
+    memory = open_memory_with_retry(tmp_path, exact=True)
+    try:
+        for _ in range(2):
+            memory.save(
+                "Use canonical nested params for execute calls.",
+                metadata=MemoryMetadata(
+                    title="Execute dispatcher requires nested params",
+                    kind="operational",
+                    subsystem="porter-ai",
+                    workstream="ontology",
+                    environment="dev",
+                ),
+            )
+    finally:
+        memory.close()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["consolidate", "--cwd", str(tmp_path), "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert "duplicate_groups" not in payload
+    assert "metadata_cohorts" not in payload
+    group = payload["clusters"][0]
+    assert group["reason"] == "embedding_similarity_cluster"
+    assert group["member_count"] == 2
+    assert "text" not in group["members"][0]
+    assert "preview" not in group["members"][0]
+
+    detail = runner.invoke(
+        app,
+        ["consolidate", "--cwd", str(tmp_path), "--group", group["group_id"], "--json"],
+    )
+    assert detail.exit_code == 0, detail.stdout
+    detail_payload = json.loads(detail.stdout)
+    assert detail_payload["group_id"] == group["group_id"]
+    assert detail_payload["member_count"] == 2
+    assert len(detail_payload["member_ids"]) == 2
+    assert "text" not in detail_payload["members"][0]
+    assert "preview" in detail_payload["members"][0]
+
+
 def test_undo_command_reverts_save(tmp_path: Path) -> None:
     init_project(tmp_path, config=MemoryConfig(embedding_backend="hash"))
     memory = open_memory_with_retry(tmp_path, exact=True)

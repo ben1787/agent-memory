@@ -57,7 +57,7 @@ from agent_memory.integration import (
 )
 from agent_memory.legacy_memory import entry_to_metadata, parse_legacy_memory_markdown
 from agent_memory.metadata_backfill import backfill_project_metadata, review_memories_with_codex
-from agent_memory.models import MemoryMetadata
+from agent_memory.models import CONSOLIDATION_SECTION_NAMES, MemoryMetadata
 from agent_memory.mcp_server import serve
 from agent_memory.project_registry import (
     list_registered_project_roots,
@@ -2638,37 +2638,96 @@ def consolidate(
         help="Project directory or any path inside the project.",
         resolve_path=True,
     ),
-    as_json: bool = typer.Option(False, "--json", help="Print JSON output."),
+    as_json: bool = typer.Option(False, "--json", help="Print compact JSON output."),
+    group_id: str | None = typer.Option(
+        None,
+        "--group",
+        help="Return one candidate group by id with all member ids and a few previews.",
+    ),
+    section: str | None = typer.Option(
+        None,
+        "--section",
+        help="Return all compact groups for one consolidation section.",
+    ),
 ) -> None:
+    if group_id is not None and section is not None:
+        raise typer.BadParameter("Use either --group or --section, not both.")
     memory = _open_memory(cwd, read_only=True)
     try:
         report = memory.consolidate()
     finally:
         memory.close()
-    payload = report.to_dict()
-    if as_json:
-        _emit(payload, True)
+    summary_payload = report.to_summary_dict()
+    if group_id is not None:
+        payload = report.group_detail_dict(group_id)
+        if payload is None:
+            raise typer.BadParameter(f"No consolidation group found with id {group_id!r}.")
+        if as_json:
+            _emit(payload, True)
+            return
+        typer.echo(f"{payload['group_id']}  action={payload['recommended_action']}")
+        member_ids = payload.get("member_ids")
+        if isinstance(member_ids, list):
+            typer.echo(f"members: {' '.join(str(member_id) for member_id in member_ids)}")
+        for member in payload.get("members", []):
+            if isinstance(member, dict):
+                typer.echo(
+                    f"  {member.get('memory_id')}: "
+                    f"{member.get('preview') or member.get('title') or ''}"
+                )
         return
+    if section is not None:
+        payload = report.section_detail_dict(section)
+        if payload is None:
+            expected = ", ".join(CONSOLIDATION_SECTION_NAMES)
+            raise typer.BadParameter(
+                f"No consolidation section found with name {section!r}. "
+                f"Expected one of: {expected}."
+            )
+        if as_json:
+            _emit(payload, True)
+            return
+        if "groups" in payload:
+            typer.echo(f"{payload['section']}  groups={payload['group_count']}")
+            for group in payload["groups"]:
+                if isinstance(group, dict):
+                    typer.echo(
+                        f"  {group['group_id']}  "
+                        f"action={group['recommended_action']}"
+                    )
+        else:
+            typer.echo(f"{payload['section']}  memories={payload['memory_count']}")
+            for memory in payload["memories"]:
+                if isinstance(memory, dict):
+                    typer.echo(
+                        f"  {memory['memory_id']}  {memory.get('preview', '')}"
+                    )
+        return
+    if as_json:
+        _emit(summary_payload, True)
+        return
+    payload = summary_payload
     typer.echo(
         f"Clusters: {len(payload['clusters'])}  threshold={payload['threshold']}  "
         f"clustered_memories={payload['clustered_memory_count']}/{payload['total_memories']}"
     )
     counts = payload.get("cleanup_candidate_counts")
+    if not isinstance(counts, dict):
+        counts = payload.get("candidate_counts")
     if isinstance(counts, dict):
         typer.echo(
             "Cleanup candidates: "
-            f"duplicates={counts.get('duplicate_groups', 0)}  "
-            f"metadata_variants={counts.get('metadata_variant_groups', 0)}  "
-            f"metadata_cohorts={counts.get('metadata_cohorts', 0)}  "
-            f"recent_bursts={counts.get('recent_bursts', 0)}  "
-            f"quality_flags={counts.get('quality_flag_groups', 0)}"
+            f"clusters={counts.get('clusters', 0)}  "
+            f"metadata_cleanup={counts.get('metadata_cleanup', 0)}  "
+            f"negative_feedback={counts.get('negative_feedback_memories', 0)}  "
+            f"unretrieved={counts.get('unretrieved_memories', 0)}"
         )
     for cluster in payload["clusters"]:
         typer.echo(
-            f"  {cluster['cluster_id']}  size={len(cluster['member_ids'])}  "
+            f"  {cluster['group_id']}  size={cluster['member_count']}  "
             f"avg={cluster['average_similarity']}  max={cluster['max_similarity']}"
         )
-        typer.echo(f"    members: {' ~ '.join(cluster['member_ids'])}")
+        typer.echo(f"    members: {' '.join(cluster['member_ids'])}")
 
 
 @app.command(
