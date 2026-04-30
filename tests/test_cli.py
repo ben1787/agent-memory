@@ -1009,13 +1009,19 @@ def test_consolidate_json_is_compact_with_group_drilldown(tmp_path: Path) -> Non
     result = runner.invoke(app, ["consolidate", "--cwd", str(tmp_path), "--json"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
+    assert "clusters" not in payload
+    assert payload["report_description"].startswith("Full compact consolidation worklist.")
     assert payload["instructions"]["commands"]["group"] == (
         "agent-memory consolidate --json --group <group_id>"
     )
-    assert "terminal output is truncated" in payload["instructions"]["output_handling"][0]
-    assert "duplicate_groups" not in payload
-    assert "metadata_cohorts" not in payload
-    group = payload["clusters"][0]
+    assert "report_path" in payload["instructions"]["output_handling"][0]
+    report_path = Path(payload["report_path"])
+    assert report_path == tmp_path / ".agent-memory" / "consolidation-report.json"
+    assert payload["report_read_command"].endswith(".agent-memory/consolidation-report.json")
+    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert "duplicate_groups" not in report_payload
+    assert "metadata_cohorts" not in report_payload
+    group = report_payload["clusters"][0]
     assert group["reason"] == "embedding_similarity_cluster"
     assert group["member_count"] == 2
     assert "text" not in group["members"][0]

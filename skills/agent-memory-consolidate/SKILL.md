@@ -21,11 +21,13 @@ agent-memory consolidation-status --json
 agent-memory consolidate --json
 ```
 
+The top-level command writes the full compact worklist to `.agent-memory/consolidation-report.json` and prints a short JSON run summary with `report_path`. Read that file before editing memories. The stdout summary is intentionally small so terminal truncation does not hide the next step.
+
 3. Review every relevant section of the report and decide what to do.
 
 Rules:
 - The consolidation report is read-only.
-- The default JSON is a compact worklist. It intentionally does not dump full memory bodies.
+- The default JSON stdout is a compact run summary. The full compact worklist is written to `report_path`; it intentionally does not dump full memory bodies.
 - The JSON includes an `instructions` block with section actions, drilldown commands, and truncation handling. Follow it when the report is handed to you without this skill text.
 - The report has only similarity clusters, standalone metadata tag cleanup, repeatedly negative-rated memories, and sufficiently tried-but-unretrieved memories.
 - To inspect one candidate, run `agent-memory consolidate --json --group <group_id>`.

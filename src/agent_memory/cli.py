@@ -4,6 +4,7 @@ import json
 from collections import deque
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ if sys.platform.startswith("win"):
             pass
 
 from agent_memory.config import (
+    APP_DIR_NAME,
     ConfigError,
     MemoryConfig,
     init_project,
@@ -88,6 +90,7 @@ from agent_memory import __display_version__, __version__
 
 
 CLAUDE_PLUGIN_MARKETPLACE = "agent-memory-plugins"
+CONSOLIDATION_REPORT_FILENAME = "consolidation-report.json"
 CLAUDE_PLUGIN_NAME = "agent-memory"
 CLAUDE_PLUGIN_ENTRY = f"{CLAUDE_PLUGIN_NAME}@{CLAUDE_PLUGIN_MARKETPLACE}"
 CLAUDE_PLUGIN_DATA_DIRNAME = f"{CLAUDE_PLUGIN_NAME}-{CLAUDE_PLUGIN_MARKETPLACE}"
@@ -240,6 +243,69 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         return
     for key, value in payload.items():
         typer.echo(f"{key}: {value}")
+
+
+def _write_consolidation_report(project_root: Path, payload: dict[str, object]) -> Path:
+    report_path = project_root / APP_DIR_NAME / CONSOLIDATION_REPORT_FILENAME
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return report_path
+
+
+def _consolidation_run_summary(
+    payload: dict[str, object],
+    *,
+    report_path: Path,
+) -> dict[str, object]:
+    counts = payload.get("candidate_counts")
+    if not isinstance(counts, dict):
+        counts = {}
+    return {
+        "instructions": payload.get("instructions"),
+        "report_path": str(report_path),
+        "report_read_command": f"cat {shlex.quote(str(report_path))}",
+        "report_description": (
+            "Full compact consolidation worklist. Read this file before editing "
+            "memories; stdout is intentionally a short run summary to avoid terminal "
+            "truncation."
+        ),
+        "threshold": payload.get("threshold"),
+        "total_memories": payload.get("total_memories"),
+        "clustered_memory_count": payload.get("clustered_memory_count"),
+        "candidate_pair_count": payload.get("candidate_pair_count"),
+        "generated_at": payload.get("generated_at"),
+        "candidate_counts": counts,
+        "unretrieved_policy": payload.get("unretrieved_policy"),
+        "sections": [
+            {
+                "name": "clusters",
+                "count": counts.get("clusters", 0),
+                "command": "agent-memory consolidate --json --section clusters",
+            },
+            {
+                "name": "metadata_cleanup",
+                "count": counts.get("metadata_cleanup", 0),
+                "command": "agent-memory consolidate --json --section metadata_cleanup",
+            },
+            {
+                "name": "negative_feedback_memories",
+                "count": counts.get("negative_feedback_memories", 0),
+                "command": "agent-memory consolidate --json --section negative_feedback_memories",
+            },
+            {
+                "name": "unretrieved_memories",
+                "count": counts.get("unretrieved_memories", 0),
+                "command": "agent-memory consolidate --json --section unretrieved_memories",
+            },
+        ],
+        "next_steps": [
+            "Read the JSON file at report_path.",
+            "Triage the compact candidates without loading every memory body.",
+            "Use --group and show only for memories you may edit.",
+            "Apply edits/deletes/saves with the memory CLI.",
+            "Run agent-memory consolidation-complete --json when done.",
+        ],
+    }
 
 
 def _format_bytes(value: int) -> str:
@@ -2638,7 +2704,15 @@ def consolidate(
         help="Project directory or any path inside the project.",
         resolve_path=True,
     ),
-    as_json: bool = typer.Option(False, "--json", help="Print compact JSON output."),
+    as_json: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Write the full compact worklist to .agent-memory/consolidation-report.json "
+            "and print a short JSON run summary. With --section or --group, print that "
+            "detail directly."
+        ),
+    ),
     group_id: str | None = typer.Option(
         None,
         "--group",
@@ -2654,6 +2728,7 @@ def consolidate(
         raise typer.BadParameter("Use either --group or --section, not both.")
     memory = _open_memory(cwd, read_only=True)
     try:
+        project_root = memory.project.root
         report = memory.consolidate()
     finally:
         memory.close()
@@ -2704,16 +2779,22 @@ def consolidate(
                     )
         return
     if as_json:
-        _emit(summary_payload, True)
+        report_path = _write_consolidation_report(project_root, summary_payload)
+        _emit(
+            _consolidation_run_summary(summary_payload, report_path=report_path),
+            True,
+        )
         return
-    payload = summary_payload
+    report_path = _write_consolidation_report(project_root, summary_payload)
+    payload = _consolidation_run_summary(summary_payload, report_path=report_path)
     typer.echo(
-        f"Clusters: {len(payload['clusters'])}  threshold={payload['threshold']}  "
+        f"Consolidation report: {payload['report_path']}"
+    )
+    typer.echo(
+        f"Clusters: {summary_payload['candidate_counts']['clusters']}  threshold={payload['threshold']}  "
         f"clustered_memories={payload['clustered_memory_count']}/{payload['total_memories']}"
     )
-    counts = payload.get("cleanup_candidate_counts")
-    if not isinstance(counts, dict):
-        counts = payload.get("candidate_counts")
+    counts = payload.get("candidate_counts")
     if isinstance(counts, dict):
         typer.echo(
             "Cleanup candidates: "
@@ -2722,12 +2803,7 @@ def consolidate(
             f"negative_feedback={counts.get('negative_feedback_memories', 0)}  "
             f"unretrieved={counts.get('unretrieved_memories', 0)}"
         )
-    for cluster in payload["clusters"]:
-        typer.echo(
-            f"  {cluster['group_id']}  size={cluster['member_count']}  "
-            f"avg={cluster['average_similarity']}  max={cluster['max_similarity']}"
-        )
-        typer.echo(f"    members: {' '.join(cluster['member_ids'])}")
+    typer.echo("Read the report file, then use --section or --group only when you need drilldown.")
 
 
 @app.command(

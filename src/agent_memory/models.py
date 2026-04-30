@@ -21,9 +21,13 @@ def consolidation_instructions_dict() -> dict[str, object]:
         ),
         "output_handling": [
             (
-                "If terminal output is truncated, rerun with "
-                "`agent-memory consolidate --json > .agent-memory/consolidation-report.json` "
-                "or inspect one section with `agent-memory consolidate --json --section <name>`."
+                "The top-level `agent-memory consolidate --json` command writes the "
+                "full compact worklist to the returned `report_path` and prints a "
+                "short run summary."
+            ),
+            (
+                "Read `report_path` before editing memories. If you only need one "
+                "section, use `agent-memory consolidate --json --section <name>`."
             ),
             (
                 "Do not load every memory body. Use `agent-memory consolidate --json "
