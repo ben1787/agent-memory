@@ -406,6 +406,94 @@ def test_consolidate_returns_overlapping_similarity_clusters(tmp_path: Path) -> 
     assert len(member_sets) == 3
 
 
+def test_consolidate_reports_deterministic_cleanup_candidates(tmp_path: Path) -> None:
+    memory = make_memory(tmp_path)
+    try:
+        first = memory.save(
+            "Use canonical nested params for execute calls.",
+            metadata=MemoryMetadata(
+                title="Execute dispatcher requires nested params",
+                kind="operational",
+                subsystem="porter-ai",
+                workstream="porter ai ontology",
+                environment="dev",
+            ),
+        ).saved[0].memory_id
+        second = memory.save(
+            "Use canonical nested params for execute calls.",
+            metadata=MemoryMetadata(
+                title="Execute dispatcher requires nested params",
+                kind="operational",
+                subsystem="porter_ai",
+                workstream="porter-ai ontology",
+                environment="dev",
+            ),
+        ).saved[0].memory_id
+        for index in range(5):
+            memory.save(
+                f"Subscription import workflow fact {index} keeps API file handling centralized.",
+                metadata=MemoryMetadata(
+                    title=f"Subscription import workflow fact {index}",
+                    kind="operational",
+                    subsystem="subscriptions",
+                    workstream="subscription import",
+                    environment="dev",
+                ),
+            )
+        short = memory.save(
+            "Hi",
+            metadata=MemoryMetadata(
+                title="Tiny note",
+                kind="operational",
+                subsystem="local-dev",
+                workstream="scratch",
+                environment="local",
+            ),
+        ).saved[0].memory_id
+
+        report = memory.consolidate()
+        payload = report.to_dict()
+    finally:
+        memory.close()
+
+    assert payload["cleanup_candidate_counts"]["duplicate_groups"] >= 1
+    assert payload["cleanup_candidate_counts"]["metadata_variant_groups"] >= 1
+    assert payload["cleanup_candidate_counts"]["metadata_cohorts"] >= 1
+    assert payload["cleanup_candidate_counts"]["recent_bursts"] >= 1
+    assert payload["cleanup_candidate_counts"]["quality_flag_groups"] >= 1
+
+    duplicate_groups = payload["duplicate_groups"]
+    assert any(
+        group["reason"] == "exact_text_duplicate"
+        and {first, second}.issubset(set(group["member_ids"]))
+        for group in duplicate_groups
+    )
+
+    metadata_variants = payload["metadata_variant_groups"]
+    assert any(
+        group["reason"] == "metadata_value_variant"
+        and group["signals"]["field"] == "subsystem"
+        and {first, second}.issubset(set(group["member_ids"]))
+        for group in metadata_variants
+    )
+
+    assert any(
+        group["reason"] == "same_metadata_cohort"
+        and "subscriptions" in group["signals"]["normalized_key"]
+        for group in payload["metadata_cohorts"]
+    )
+    assert any(
+        group["reason"] == "same_day_title_token_burst"
+        and "subscription" in group["signals"]["tokens"]
+        for group in payload["recent_bursts"]
+    )
+    assert any(
+        group["reason"] == "very_short"
+        and short in group["member_ids"]
+        for group in payload["quality_flag_groups"]
+    )
+
+
 def test_save_rejects_overlong_memory(tmp_path: Path) -> None:
     memory = make_memory(tmp_path)
     try:

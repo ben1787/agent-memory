@@ -229,6 +229,26 @@ class ConsolidationCluster:
 
 
 @dataclass(slots=True)
+class ConsolidationCandidateGroup:
+    group_id: str
+    reason: str
+    member_ids: list[str]
+    members: list[ConsolidationClusterMember]
+    recommended_action: str
+    signals: dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "group_id": self.group_id,
+            "reason": self.reason,
+            "member_ids": self.member_ids,
+            "members": [member.to_dict() for member in self.members],
+            "recommended_action": self.recommended_action,
+            "signals": self.signals,
+        }
+
+
+@dataclass(slots=True)
 class ConsolidationReport:
     threshold: float
     clusters: list[ConsolidationCluster]
@@ -236,15 +256,37 @@ class ConsolidationReport:
     clustered_memory_count: int
     candidate_pair_count: int
     generated_at: str
+    duplicate_groups: list[ConsolidationCandidateGroup] = field(default_factory=list)
+    metadata_variant_groups: list[ConsolidationCandidateGroup] = field(default_factory=list)
+    metadata_cohorts: list[ConsolidationCandidateGroup] = field(default_factory=list)
+    recent_bursts: list[ConsolidationCandidateGroup] = field(default_factory=list)
+    quality_flag_groups: list[ConsolidationCandidateGroup] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
+        cleanup_candidate_counts = {
+            "duplicate_groups": len(self.duplicate_groups),
+            "metadata_variant_groups": len(self.metadata_variant_groups),
+            "metadata_cohorts": len(self.metadata_cohorts),
+            "recent_bursts": len(self.recent_bursts),
+            "quality_flag_groups": len(self.quality_flag_groups),
+        }
         return {
             "threshold": self.threshold,
+            "cleanup_candidate_counts": cleanup_candidate_counts,
             "clusters": [cluster.to_dict() for cluster in self.clusters],
             "total_memories": self.total_memories,
             "clustered_memory_count": self.clustered_memory_count,
             "candidate_pair_count": self.candidate_pair_count,
             "generated_at": self.generated_at,
+            "duplicate_groups": [group.to_dict() for group in self.duplicate_groups],
+            "metadata_variant_groups": [
+                group.to_dict() for group in self.metadata_variant_groups
+            ],
+            "metadata_cohorts": [group.to_dict() for group in self.metadata_cohorts],
+            "recent_bursts": [group.to_dict() for group in self.recent_bursts],
+            "quality_flag_groups": [
+                group.to_dict() for group in self.quality_flag_groups
+            ],
         }
 
 

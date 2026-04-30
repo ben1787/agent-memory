@@ -2653,6 +2653,16 @@ def consolidate(
         f"Clusters: {len(payload['clusters'])}  threshold={payload['threshold']}  "
         f"clustered_memories={payload['clustered_memory_count']}/{payload['total_memories']}"
     )
+    counts = payload.get("cleanup_candidate_counts")
+    if isinstance(counts, dict):
+        typer.echo(
+            "Cleanup candidates: "
+            f"duplicates={counts.get('duplicate_groups', 0)}  "
+            f"metadata_variants={counts.get('metadata_variant_groups', 0)}  "
+            f"metadata_cohorts={counts.get('metadata_cohorts', 0)}  "
+            f"recent_bursts={counts.get('recent_bursts', 0)}  "
+            f"quality_flags={counts.get('quality_flag_groups', 0)}"
+        )
     for cluster in payload["clusters"]:
         typer.echo(
             f"  {cluster['cluster_id']}  size={len(cluster['member_ids'])}  "
