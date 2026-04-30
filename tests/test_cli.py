@@ -1012,9 +1012,19 @@ def test_consolidate_json_is_compact_with_group_drilldown(tmp_path: Path) -> Non
     assert "clusters" not in payload
     assert payload["task_status"] == "action_required_not_complete"
     assert payload["task_complete"] is False
+    assert payload["agent_handoff"]["goal"].startswith(
+        "Complete the Agent Memory consolidation pass"
+    )
+    assert payload["agent_handoff"]["required_next_command"] == payload["report_read_command"]
+    assert payload["agent_handoff"]["do_not_stop_until"].endswith(
+        "run completion_command."
+    )
     assert payload["completion_command"] == "agent-memory consolidation-complete --json"
     assert payload["calling_agent_task"].startswith("Do not stop after this summary.")
     assert payload["report_description"].startswith("Full compact consolidation worklist.")
+    assert payload["instructions"]["agent_handoff"]["assumption"].startswith(
+        "The caller may know nothing"
+    )
     assert payload["instructions"]["calling_agent_task"].startswith(
         "Complete the consolidation pass"
     )

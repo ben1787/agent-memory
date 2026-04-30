@@ -21,14 +21,14 @@ agent-memory consolidation-status --json
 agent-memory consolidate --json
 ```
 
-The top-level command writes the full compact worklist to `.agent-memory/consolidation-report.json` and prints a short JSON run summary with `task_status`, `required_next_command`, `report_path`, and `completion_command`. If `task_complete` is `false`, do not stop after summarizing stdout; run `required_next_command` and review the report before editing memories. The stdout summary is intentionally small so terminal truncation does not hide the next step.
+The top-level command writes the full compact worklist to `.agent-memory/consolidation-report.json` and prints a short JSON run summary with an `agent_handoff` object, `task_status`, `required_next_command`, `report_path`, and `completion_command`. If `task_complete` is `false`, do not stop after summarizing stdout; run `required_next_command` and review the report before editing memories. The stdout summary is intentionally small so terminal truncation does not hide the next step.
 
 3. Review every relevant section of the returned report.
 
 Rules:
 - The report is read-only.
 - The default JSON stdout is a compact run summary. The full compact worklist is written to `report_path`; it intentionally does not dump full memory bodies.
-- The JSON includes an `instructions` block with section actions, drilldown commands, and truncation handling. Follow it when the report is handed to you without this skill text.
+- The JSON includes `agent_handoff` and `instructions` blocks with the full workflow contract, section actions, drilldown commands, and truncation handling. Follow them when the report is handed to you without this skill text.
 - The report has only similarity clusters, standalone metadata tag cleanup, repeatedly negative-rated memories, and sufficiently tried-but-unretrieved memories.
 - To inspect one candidate, run `agent-memory consolidate --json --group <group_id>`.
 - To inspect a specific memory body, run `agent-memory show <memory_id> --json`.

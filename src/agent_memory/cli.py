@@ -264,6 +264,27 @@ def _consolidation_run_summary(
     return {
         "task_status": "action_required_not_complete",
         "task_complete": False,
+        "agent_handoff": {
+            "entrypoint": "agent-memory consolidate --json",
+            "goal": (
+                "Complete the Agent Memory consolidation pass. The human should not "
+                "need to provide any context beyond asking you to run the entrypoint."
+            ),
+            "required_next_command": report_read_command,
+            "completion_command": "agent-memory consolidation-complete --json",
+            "workflow": [
+                "Run required_next_command and read the generated report.",
+                "Use the report instructions and candidate data as the source of truth.",
+                "Inspect only candidate groups or memories that may need edits.",
+                "Apply warranted edits/deletes/saves with the Agent Memory CLI.",
+                "Leave non-actionable candidates unchanged.",
+                "Run completion_command only after the review is actually complete.",
+            ],
+            "do_not_stop_until": (
+                "You have read the report, reviewed the candidates, applied any "
+                "warranted memory changes, and run completion_command."
+            ),
+        },
         "calling_agent_task": (
             "Do not stop after this summary. Run `required_next_command`, review "
             "the report, edit/delete/save selected memories when warranted, and only "
