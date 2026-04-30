@@ -12,38 +12,41 @@ CONSOLIDATION_SECTION_NAMES = (
 )
 
 
+def consolidation_agent_handoff_dict() -> dict[str, object]:
+    return {
+        "entrypoint": "agent-memory consolidate --json",
+        "goal": (
+            "Complete an Agent Memory consolidation pass from the information "
+            "returned by the entrypoint command and the report file it creates."
+        ),
+        "assumption": (
+            "The caller may know nothing except to run the entrypoint command; "
+            "all remaining workflow instructions must come from this payload."
+        ),
+        "required_workflow": [
+            "Read the generated consolidation report before deciding anything.",
+            "Review candidate clusters, metadata cleanup, negative-feedback memories, and unretrieved memories.",
+            "Inspect full memory bodies only for candidates you may edit, delete, or merge.",
+            "Apply warranted edits/deletes/saves with the Agent Memory CLI.",
+            "Leave distinct or useful memories unchanged.",
+            "Run the completion command only after the review and any warranted edits are done.",
+        ],
+        "success_criteria": [
+            "Every relevant candidate section was reviewed or explicitly judged not actionable.",
+            "Only redundant, noisy, badly tagged, or low-utility memories were changed.",
+            "The memory store was not dumped wholesale.",
+            "Consolidation was marked complete after the pass.",
+        ],
+        "failure_modes": [
+            "Do not stop after summarizing the entrypoint stdout.",
+            "Do not mark consolidation complete before reading the report.",
+            "Do not delete memories solely because they appear in a similarity cluster.",
+        ],
+    }
+
+
 def consolidation_instructions_dict() -> dict[str, object]:
     return {
-        "agent_handoff": {
-            "entrypoint": "agent-memory consolidate --json",
-            "goal": (
-                "Complete an Agent Memory consolidation pass from the information "
-                "returned by the entrypoint command and the report file it creates."
-            ),
-            "assumption": (
-                "The caller may know nothing except to run the entrypoint command; "
-                "all remaining workflow instructions must come from this payload."
-            ),
-            "required_workflow": [
-                "Read the generated consolidation report before deciding anything.",
-                "Review candidate clusters, metadata cleanup, negative-feedback memories, and unretrieved memories.",
-                "Inspect full memory bodies only for candidates you may edit, delete, or merge.",
-                "Apply warranted edits/deletes/saves with the Agent Memory CLI.",
-                "Leave distinct or useful memories unchanged.",
-                "Run the completion command only after the review and any warranted edits are done.",
-            ],
-            "success_criteria": [
-                "Every relevant candidate section was reviewed or explicitly judged not actionable.",
-                "Only redundant, noisy, badly tagged, or low-utility memories were changed.",
-                "The memory store was not dumped wholesale.",
-                "Consolidation was marked complete after the pass.",
-            ],
-            "failure_modes": [
-                "Do not stop after summarizing the entrypoint stdout.",
-                "Do not mark consolidation complete before reading the report.",
-                "Do not delete memories solely because they appear in a similarity cluster.",
-            ],
-        },
         "calling_agent_task": (
             "Complete the consolidation pass, not just the command execution. "
             "Review the report, edit/delete/save selected memories when warranted, "
@@ -517,6 +520,7 @@ class ConsolidationReport:
 
     def to_summary_dict(self) -> dict[str, object]:
         return {
+            "agent_handoff": consolidation_agent_handoff_dict(),
             "instructions": consolidation_instructions_dict(),
             "threshold": self.threshold,
             "total_memories": self.total_memories,

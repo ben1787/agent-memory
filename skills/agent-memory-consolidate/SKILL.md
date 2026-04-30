@@ -21,7 +21,7 @@ agent-memory consolidation-status --json
 agent-memory consolidate --json
 ```
 
-The top-level command writes the full compact worklist to `.agent-memory/consolidation-report.json` and prints a short JSON run summary with an `agent_handoff` object, `task_status`, `required_next_command`, `report_path`, and `completion_command`. If `task_complete` is `false`, do not stop after summarizing stdout; run `required_next_command` and review the report before editing memories. The stdout summary is intentionally small so terminal truncation does not hide the next step.
+The top-level command writes the full compact worklist to `.agent-memory/consolidation-report.json` and prints a short JSON run summary with an `agent_handoff` object, `task_status`, `actionable_candidate_count`, `soft_review_candidate_count`, `required_next_command`, `report_path`, and `completion_command`. If `task_complete` is `false`, do not stop after summarizing stdout; run `required_next_command` and review the report before editing memories. The stdout summary is intentionally small so terminal truncation does not hide the next step.
 
 3. Review every relevant section of the report and decide what to do.
 
@@ -37,6 +37,8 @@ Rules:
 - `metadata_cleanup` surfaces similar standalone tag values only; do not assume memory-level redundancy from tag cleanup.
 - `negative_feedback_memories` surfaces memories with more than three negative per-memory ratings and zero positive ratings. Editing such a memory resets its prior feedback.
 - `unretrieved_memories` surfaces memories with zero accesses only after enough later recall queries exist to make non-retrieval meaningful. Count both direct recall calls and prompt-injection recall calls.
+- `clusters`, `metadata_cleanup`, and `negative_feedback_memories` count as actionable cleanup candidates. `unretrieved_memories` is a soft review signal; if it is the only remaining section, review it without assuming edits are required.
+- If you intentionally want the CLI to mark the pass complete when there are no actionable cleanup candidates, use `agent-memory consolidate --json --complete-if-no-actionable`.
 - Do not do contradiction resolution or timestamp-based truth arbitration in this pass.
 - Leave candidates alone if they already look clean and distinct.
 - If a candidate group is redundant or messy, replace it with fewer, more orthogonal memories.

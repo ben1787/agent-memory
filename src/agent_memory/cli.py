@@ -91,6 +91,12 @@ from agent_memory import __display_version__, __version__
 
 CLAUDE_PLUGIN_MARKETPLACE = "agent-memory-plugins"
 CONSOLIDATION_REPORT_FILENAME = "consolidation-report.json"
+ACTIONABLE_CONSOLIDATION_SECTIONS = (
+    "clusters",
+    "metadata_cleanup",
+    "negative_feedback_memories",
+)
+SOFT_REVIEW_CONSOLIDATION_SECTIONS = ("unretrieved_memories",)
 CLAUDE_PLUGIN_NAME = "agent-memory"
 CLAUDE_PLUGIN_ENTRY = f"{CLAUDE_PLUGIN_NAME}@{CLAUDE_PLUGIN_MARKETPLACE}"
 CLAUDE_PLUGIN_DATA_DIRNAME = f"{CLAUDE_PLUGIN_NAME}-{CLAUDE_PLUGIN_MARKETPLACE}"
@@ -252,46 +258,165 @@ def _write_consolidation_report(project_root: Path, payload: dict[str, object]) 
     return report_path
 
 
+def _candidate_count(counts: dict[str, object], name: str) -> int:
+    value = counts.get(name, 0)
+    if isinstance(value, int):
+        return value
+    return 0
+
+
+def _consolidation_count_totals(counts: dict[str, object]) -> tuple[int, int]:
+    actionable_count = sum(
+        _candidate_count(counts, name)
+        for name in ACTIONABLE_CONSOLIDATION_SECTIONS
+    )
+    soft_review_count = sum(
+        _candidate_count(counts, name)
+        for name in SOFT_REVIEW_CONSOLIDATION_SECTIONS
+    )
+    return actionable_count, soft_review_count
+
+
+def _consolidation_status_for_counts(
+    *,
+    actionable_count: int,
+    soft_review_count: int,
+    completed_by_command: bool,
+) -> tuple[str, str]:
+    if completed_by_command:
+        return (
+            "completed_no_actionable_candidates",
+            "completed_by_complete_if_no_actionable",
+        )
+    if actionable_count > 0:
+        return (
+            "action_required_not_complete",
+            "read_report_then_review_actionable_candidates",
+        )
+    if soft_review_count > 0:
+        return (
+            "review_required_no_cleanup_candidates",
+            "read_report_then_complete_if_no_soft_review_items_need_changes",
+        )
+    return ("ready_to_complete_no_candidates", "complete_now_no_candidates")
+
+
 def _consolidation_run_summary(
     payload: dict[str, object],
     *,
     report_path: Path,
+    complete_if_no_actionable: bool = False,
+    completion_result: dict[str, object] | None = None,
 ) -> dict[str, object]:
     counts = payload.get("candidate_counts")
     if not isinstance(counts, dict):
         counts = {}
     report_read_command = f"cat {shlex.quote(str(report_path))}"
+    actionable_count, soft_review_count = _consolidation_count_totals(counts)
+    completed_by_command = completion_result is not None
+    task_status, completion_recommendation = _consolidation_status_for_counts(
+        actionable_count=actionable_count,
+        soft_review_count=soft_review_count,
+        completed_by_command=completed_by_command,
+    )
+    required_next_command = None if completed_by_command else report_read_command
+    completion_command = (
+        None
+        if completed_by_command
+        else "agent-memory consolidation-complete --json"
+    )
+    if completed_by_command:
+        calling_agent_task = (
+            "No hard cleanup candidates were present, so this command marked "
+            "consolidation complete. You may read `report_read_command` for the "
+            "saved report and any soft review signals."
+        )
+        workflow = [
+            "No hard cleanup candidates were present.",
+            "The full compact report was still written to report_path.",
+            "Consolidation was marked complete by this command.",
+        ]
+        do_not_stop_until = "This command already completed the consolidation status update."
+        next_steps = [
+            "Consolidation was marked complete by this command.",
+            "Optionally run report_read_command to inspect the saved report.",
+        ]
+    elif actionable_count > 0:
+        calling_agent_task = (
+            "Do not stop after this summary. Run `required_next_command`, review "
+            "the report, edit/delete/save selected memories when warranted, and only "
+            "then run `completion_command`."
+        )
+        workflow = [
+            "Run required_next_command and read the generated report.",
+            "Use the report instructions and candidate data as the source of truth.",
+            "Inspect only candidate groups or memories that may need edits.",
+            "Apply warranted edits/deletes/saves with the Agent Memory CLI.",
+            "Leave non-actionable candidates unchanged.",
+            "Run completion_command only after the review is actually complete.",
+        ]
+        do_not_stop_until = (
+            "You have read the report, reviewed the candidates, applied any "
+            "warranted memory changes, and run completion_command."
+        )
+        next_steps = [
+            "Run required_next_command to read the JSON worklist.",
+            "Triage the compact candidates without loading every memory body.",
+            "Use --group and show only for memories you may edit.",
+            "Apply edits/deletes/saves with the memory CLI.",
+            "Run completion_command when done.",
+        ]
+    else:
+        calling_agent_task = (
+            "No hard cleanup candidates were found. Run `required_next_command`, "
+            "review any soft signals in the report, then run `completion_command` "
+            "if no memory changes are warranted."
+        )
+        workflow = [
+            "Run required_next_command and read the generated report.",
+            "Review soft signals such as unretrieved memories without assuming they are bad.",
+            "Apply edits/deletes only if the report reveals a clearly warranted change.",
+            "Run completion_command after the soft review.",
+        ]
+        do_not_stop_until = (
+            "You have read the report, reviewed the soft signals, applied any "
+            "clearly warranted memory changes, and run completion_command."
+        )
+        next_steps = [
+            "Run required_next_command to read the JSON worklist.",
+            "Review soft signals without assuming they require edits.",
+            "Apply edits/deletes/saves only if clearly warranted.",
+            "Run completion_command when done.",
+        ]
+    auto_complete_skipped_reason = None
+    if complete_if_no_actionable and actionable_count > 0:
+        auto_complete_skipped_reason = (
+            "Not completed automatically because actionable_candidate_count is greater than 0."
+        )
     return {
-        "task_status": "action_required_not_complete",
-        "task_complete": False,
+        "task_status": task_status,
+        "task_complete": completed_by_command,
+        "actionable_candidate_count": actionable_count,
+        "soft_review_candidate_count": soft_review_count,
+        "total_candidate_count": actionable_count + soft_review_count,
+        "completion_recommendation": completion_recommendation,
+        "complete_if_no_actionable": complete_if_no_actionable,
+        "auto_complete_skipped_reason": auto_complete_skipped_reason,
+        "completion_result": completion_result,
         "agent_handoff": {
             "entrypoint": "agent-memory consolidate --json",
             "goal": (
                 "Complete the Agent Memory consolidation pass. The human should not "
                 "need to provide any context beyond asking you to run the entrypoint."
             ),
-            "required_next_command": report_read_command,
-            "completion_command": "agent-memory consolidation-complete --json",
-            "workflow": [
-                "Run required_next_command and read the generated report.",
-                "Use the report instructions and candidate data as the source of truth.",
-                "Inspect only candidate groups or memories that may need edits.",
-                "Apply warranted edits/deletes/saves with the Agent Memory CLI.",
-                "Leave non-actionable candidates unchanged.",
-                "Run completion_command only after the review is actually complete.",
-            ],
-            "do_not_stop_until": (
-                "You have read the report, reviewed the candidates, applied any "
-                "warranted memory changes, and run completion_command."
-            ),
+            "required_next_command": required_next_command,
+            "completion_command": completion_command,
+            "workflow": workflow,
+            "do_not_stop_until": do_not_stop_until,
         },
-        "calling_agent_task": (
-            "Do not stop after this summary. Run `required_next_command`, review "
-            "the report, edit/delete/save selected memories when warranted, and only "
-            "then run `completion_command`."
-        ),
-        "required_next_command": report_read_command,
-        "completion_command": "agent-memory consolidation-complete --json",
+        "calling_agent_task": calling_agent_task,
+        "required_next_command": required_next_command,
+        "completion_command": completion_command,
         "instructions": payload.get("instructions"),
         "report_path": str(report_path),
         "report_read_command": report_read_command,
@@ -329,13 +454,7 @@ def _consolidation_run_summary(
                 "command": "agent-memory consolidate --json --section unretrieved_memories",
             },
         ],
-        "next_steps": [
-            "Run required_next_command to read the JSON worklist.",
-            "Triage the compact candidates without loading every memory body.",
-            "Use --group and show only for memories you may edit.",
-            "Apply edits/deletes/saves with the memory CLI.",
-            "Run completion_command when done.",
-        ],
+        "next_steps": next_steps,
     }
 
 
@@ -2754,9 +2873,20 @@ def consolidate(
         "--section",
         help="Return all compact groups for one consolidation section.",
     ),
+    complete_if_no_actionable: bool = typer.Option(
+        False,
+        "--complete-if-no-actionable",
+        help=(
+            "After writing the report, mark consolidation complete automatically "
+            "when there are no hard cleanup candidates (clusters, metadata cleanup, "
+            "or negative-feedback memories)."
+        ),
+    ),
 ) -> None:
     if group_id is not None and section is not None:
         raise typer.BadParameter("Use either --group or --section, not both.")
+    if complete_if_no_actionable and (group_id is not None or section is not None):
+        raise typer.BadParameter("--complete-if-no-actionable is only valid for the top-level report.")
     memory = _open_memory(cwd, read_only=True)
     try:
         project_root = memory.project.root
@@ -2811,13 +2941,35 @@ def consolidate(
         return
     if as_json:
         report_path = _write_consolidation_report(project_root, summary_payload)
+        completion_result = None
+        counts = summary_payload.get("candidate_counts")
+        if complete_if_no_actionable and isinstance(counts, dict):
+            actionable_count, _ = _consolidation_count_totals(counts)
+            if actionable_count == 0:
+                completion_result = mark_consolidation_completed(project_root)
         _emit(
-            _consolidation_run_summary(summary_payload, report_path=report_path),
+            _consolidation_run_summary(
+                summary_payload,
+                report_path=report_path,
+                complete_if_no_actionable=complete_if_no_actionable,
+                completion_result=completion_result,
+            ),
             True,
         )
         return
     report_path = _write_consolidation_report(project_root, summary_payload)
-    payload = _consolidation_run_summary(summary_payload, report_path=report_path)
+    completion_result = None
+    counts = summary_payload.get("candidate_counts")
+    if complete_if_no_actionable and isinstance(counts, dict):
+        actionable_count, _ = _consolidation_count_totals(counts)
+        if actionable_count == 0:
+            completion_result = mark_consolidation_completed(project_root)
+    payload = _consolidation_run_summary(
+        summary_payload,
+        report_path=report_path,
+        complete_if_no_actionable=complete_if_no_actionable,
+        completion_result=completion_result,
+    )
     typer.echo(
         f"Consolidation report: {payload['report_path']}"
     )
