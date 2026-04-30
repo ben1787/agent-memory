@@ -26,6 +26,7 @@ agent-memory consolidate --json
 Rules:
 - The report is read-only.
 - The default JSON is a compact worklist. It intentionally does not dump full memory bodies.
+- The JSON includes an `instructions` block with section actions, drilldown commands, and truncation handling. Follow it when the report is handed to you without this skill text.
 - The report has only similarity clusters, standalone metadata tag cleanup, repeatedly negative-rated memories, and sufficiently tried-but-unretrieved memories.
 - To inspect one candidate, run `agent-memory consolidate --json --group <group_id>`.
 - To inspect a specific memory body, run `agent-memory show <memory_id> --json`.

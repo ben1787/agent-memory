@@ -12,6 +12,54 @@ CONSOLIDATION_SECTION_NAMES = (
 )
 
 
+def consolidation_instructions_dict() -> dict[str, object]:
+    return {
+        "prompt": (
+            "Review this read-only Agent Memory cleanup worklist. Clean only the "
+            "candidates that are redundant, noisy, badly tagged, or low utility; leave "
+            "distinct useful memories unchanged."
+        ),
+        "output_handling": [
+            (
+                "If terminal output is truncated, rerun with "
+                "`agent-memory consolidate --json > .agent-memory/consolidation-report.json` "
+                "or inspect one section with `agent-memory consolidate --json --section <name>`."
+            ),
+            (
+                "Do not load every memory body. Use `agent-memory consolidate --json "
+                "--group <group_id>` for candidate detail, then `agent-memory show "
+                "<memory_id> --json` only for memories you may edit."
+            ),
+        ],
+        "section_actions": {
+            "clusters": (
+                "Review embedding-similar memories. Merge or delete only when members "
+                "are redundant or noisy; keep memories that are independently useful."
+            ),
+            "metadata_cleanup": (
+                "Normalize tag values only when the standalone tag values mean the "
+                "same thing. This section does not imply memory-level duplication."
+            ),
+            "negative_feedback_memories": (
+                "Rewrite or delete memories with more than three negative ratings and "
+                "zero positive ratings. Editing a memory resets prior feedback counts."
+            ),
+            "unretrieved_memories": (
+                "Review memories with access_count=0 after enough later recall queries. "
+                "Improve text/tags or delete only if they are low utility."
+            ),
+        },
+        "commands": {
+            "section": "agent-memory consolidate --json --section <section>",
+            "group": "agent-memory consolidate --json --group <group_id>",
+            "show": "agent-memory show <memory_id> --json",
+            "edit": "agent-memory edit <memory_id> --stdin",
+            "delete": "agent-memory delete <memory_id> --yes",
+            "complete": "agent-memory consolidation-complete --json",
+        },
+    }
+
+
 @dataclass(slots=True)
 class MemoryMetadata:
     title: str | None = None
@@ -430,6 +478,7 @@ class ConsolidationReport:
 
     def to_summary_dict(self) -> dict[str, object]:
         return {
+            "instructions": consolidation_instructions_dict(),
             "threshold": self.threshold,
             "total_memories": self.total_memories,
             "clustered_memory_count": self.clustered_memory_count,
@@ -465,6 +514,7 @@ class ConsolidationReport:
     def section_detail_dict(self, section_name: str) -> dict[str, object] | None:
         if section_name == "clusters":
             return {
+                "instructions": consolidation_instructions_dict(),
                 "section": section_name,
                 "group_count": len(self.clusters),
                 "groups": [
@@ -474,6 +524,7 @@ class ConsolidationReport:
             }
         if section_name == "metadata_cleanup":
             return {
+                "instructions": consolidation_instructions_dict(),
                 "section": section_name,
                 "group_count": len(self.metadata_cleanup),
                 "groups": [
@@ -483,6 +534,7 @@ class ConsolidationReport:
             }
         if section_name == "negative_feedback_memories":
             return {
+                "instructions": consolidation_instructions_dict(),
                 "section": section_name,
                 "memory_count": len(self.negative_feedback_memories),
                 "memories": [
@@ -492,6 +544,7 @@ class ConsolidationReport:
             }
         if section_name == "unretrieved_memories":
             return {
+                "instructions": consolidation_instructions_dict(),
                 "section": section_name,
                 "memory_count": len(self.unretrieved_memories),
                 "memories": [
@@ -509,12 +562,14 @@ class ConsolidationReport:
                 sample_member_limit=10,
                 include_preview=True,
             )
+            payload["instructions"] = consolidation_instructions_dict()
             payload["section"] = "clusters"
             payload["pair_edges"] = [edge.to_dict() for edge in cluster.pair_edges]
             return payload
         for group in self.metadata_cleanup:
             if group.group_id == group_id:
                 payload = group.to_metadata_cleanup_dict()
+                payload["instructions"] = consolidation_instructions_dict()
                 payload["section"] = "metadata_cleanup"
                 return payload
         return None

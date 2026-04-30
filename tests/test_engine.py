@@ -454,6 +454,12 @@ def test_consolidate_reports_deterministic_cleanup_candidates(tmp_path: Path) ->
 
     assert payload["candidate_counts"]["clusters"] >= 1
     assert payload["candidate_counts"]["metadata_cleanup"] >= 1
+    assert payload["instructions"]["section_actions"]["clusters"].startswith(
+        "Review embedding-similar memories."
+    )
+    assert payload["instructions"]["commands"]["section"] == (
+        "agent-memory consolidate --json --section <section>"
+    )
     assert "duplicate_groups" not in payload
     assert "metadata_cohorts" not in payload
     assert "recent_bursts" not in payload
@@ -474,6 +480,9 @@ def test_consolidate_reports_deterministic_cleanup_candidates(tmp_path: Path) ->
     ]
     variant_detail = report.group_detail_dict(summary_variant["group_id"])
     assert variant_detail is not None
+    assert variant_detail["instructions"]["commands"]["complete"] == (
+        "agent-memory consolidation-complete --json"
+    )
     assert "member_ids" not in variant_detail
     assert "sample_members" not in variant_detail
 

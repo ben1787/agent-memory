@@ -1009,6 +1009,10 @@ def test_consolidate_json_is_compact_with_group_drilldown(tmp_path: Path) -> Non
     result = runner.invoke(app, ["consolidate", "--cwd", str(tmp_path), "--json"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
+    assert payload["instructions"]["commands"]["group"] == (
+        "agent-memory consolidate --json --group <group_id>"
+    )
+    assert "terminal output is truncated" in payload["instructions"]["output_handling"][0]
     assert "duplicate_groups" not in payload
     assert "metadata_cohorts" not in payload
     group = payload["clusters"][0]
@@ -1023,6 +1027,9 @@ def test_consolidate_json_is_compact_with_group_drilldown(tmp_path: Path) -> Non
     )
     assert detail.exit_code == 0, detail.stdout
     detail_payload = json.loads(detail.stdout)
+    assert detail_payload["instructions"]["commands"]["show"] == (
+        "agent-memory show <memory_id> --json"
+    )
     assert detail_payload["group_id"] == group["group_id"]
     assert detail_payload["member_count"] == 2
     assert len(detail_payload["member_ids"]) == 2
