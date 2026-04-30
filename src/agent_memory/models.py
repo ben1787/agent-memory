@@ -14,6 +14,11 @@ CONSOLIDATION_SECTION_NAMES = (
 
 def consolidation_instructions_dict() -> dict[str, object]:
     return {
+        "calling_agent_task": (
+            "Complete the consolidation pass, not just the command execution. "
+            "Review the report, edit/delete/save selected memories when warranted, "
+            "and mark consolidation complete only after that review is done."
+        ),
         "prompt": (
             "Review this read-only Agent Memory cleanup worklist. Clean only the "
             "candidates that are redundant, noisy, badly tagged, or low utility; leave "

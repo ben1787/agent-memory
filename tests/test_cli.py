@@ -1010,7 +1010,14 @@ def test_consolidate_json_is_compact_with_group_drilldown(tmp_path: Path) -> Non
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert "clusters" not in payload
+    assert payload["task_status"] == "action_required_not_complete"
+    assert payload["task_complete"] is False
+    assert payload["completion_command"] == "agent-memory consolidation-complete --json"
+    assert payload["calling_agent_task"].startswith("Do not stop after this summary.")
     assert payload["report_description"].startswith("Full compact consolidation worklist.")
+    assert payload["instructions"]["calling_agent_task"].startswith(
+        "Complete the consolidation pass"
+    )
     assert payload["instructions"]["commands"]["group"] == (
         "agent-memory consolidate --json --group <group_id>"
     )
@@ -1018,6 +1025,7 @@ def test_consolidate_json_is_compact_with_group_drilldown(tmp_path: Path) -> Non
     report_path = Path(payload["report_path"])
     assert report_path == tmp_path / ".agent-memory" / "consolidation-report.json"
     assert payload["report_read_command"].endswith(".agent-memory/consolidation-report.json")
+    assert payload["required_next_command"] == payload["report_read_command"]
     report_payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert "duplicate_groups" not in report_payload
     assert "metadata_cohorts" not in report_payload

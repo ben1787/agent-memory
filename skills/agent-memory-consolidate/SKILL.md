@@ -21,7 +21,7 @@ agent-memory consolidation-status --json
 agent-memory consolidate --json
 ```
 
-The top-level command writes the full compact worklist to `.agent-memory/consolidation-report.json` and prints a short JSON run summary with `report_path`. Read that file before editing memories. The stdout summary is intentionally small so terminal truncation does not hide the next step.
+The top-level command writes the full compact worklist to `.agent-memory/consolidation-report.json` and prints a short JSON run summary with `task_status`, `required_next_command`, `report_path`, and `completion_command`. If `task_complete` is `false`, do not stop after summarizing stdout; run `required_next_command` and review the report before editing memories. The stdout summary is intentionally small so terminal truncation does not hide the next step.
 
 3. Review every relevant section of the report and decide what to do.
 

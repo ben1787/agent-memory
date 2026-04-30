@@ -260,10 +260,20 @@ def _consolidation_run_summary(
     counts = payload.get("candidate_counts")
     if not isinstance(counts, dict):
         counts = {}
+    report_read_command = f"cat {shlex.quote(str(report_path))}"
     return {
+        "task_status": "action_required_not_complete",
+        "task_complete": False,
+        "calling_agent_task": (
+            "Do not stop after this summary. Run `required_next_command`, review "
+            "the report, edit/delete/save selected memories when warranted, and only "
+            "then run `completion_command`."
+        ),
+        "required_next_command": report_read_command,
+        "completion_command": "agent-memory consolidation-complete --json",
         "instructions": payload.get("instructions"),
         "report_path": str(report_path),
-        "report_read_command": f"cat {shlex.quote(str(report_path))}",
+        "report_read_command": report_read_command,
         "report_description": (
             "Full compact consolidation worklist. Read this file before editing "
             "memories; stdout is intentionally a short run summary to avoid terminal "
@@ -299,11 +309,11 @@ def _consolidation_run_summary(
             },
         ],
         "next_steps": [
-            "Read the JSON file at report_path.",
+            "Run required_next_command to read the JSON worklist.",
             "Triage the compact candidates without loading every memory body.",
             "Use --group and show only for memories you may edit.",
             "Apply edits/deletes/saves with the memory CLI.",
-            "Run agent-memory consolidation-complete --json when done.",
+            "Run completion_command when done.",
         ],
     }
 
