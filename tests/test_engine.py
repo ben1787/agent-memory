@@ -196,10 +196,10 @@ def test_load_project_migrates_legacy_default_config(tmp_path: Path) -> None:
     assert project.config.stored_embedding_dimensions == 384
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    assert persisted["version"] == 8
+    assert persisted["version"] == 9
     assert persisted["embedding_model"] == "snowflake/snowflake-arctic-embed-m"
     assert persisted["stored_embedding_model"] == "BAAI/bge-small-en-v1.5"
-    assert persisted["consolidation_similarity_threshold"] == 0.8
+    assert persisted["consolidation_similarity_threshold"] == 0.85
 
 
 def test_save_and_recall_use_document_and_query_embeddings_when_available(tmp_path: Path) -> None:
@@ -547,7 +547,7 @@ def test_consolidate_reports_unretrieved_after_enough_later_queries(tmp_path: Pa
                 environment="local",
             ),
         ).saved[0].memory_id
-        for index in range(100):
+        for index in range(1000):
             log_query(
                 tmp_path / ".agent-memory" / QUERY_LOG_FILENAME,
                 f"later query {index}",
@@ -560,7 +560,7 @@ def test_consolidate_reports_unretrieved_after_enough_later_queries(tmp_path: Pa
     assert [candidate.memory_id for candidate in report.unretrieved_memories] == [
         memory_id
     ]
-    assert report.unretrieved_memories[0].queries_since_created == 100
+    assert report.unretrieved_memories[0].queries_since_created == 1000
 
 
 def test_save_rejects_overlong_memory(tmp_path: Path) -> None:

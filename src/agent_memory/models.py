@@ -237,10 +237,14 @@ class ConsolidationCluster:
     pair_edges: list[ConsolidationClusterEdge]
     average_similarity: float
     max_similarity: float
+    reason: str = "embedding_similarity_cluster"
+    recommended_action: str = "merge_or_delete_if_not_independently_useful"
 
     def to_dict(self) -> dict[str, object]:
         return {
             "cluster_id": self.cluster_id,
+            "reason": self.reason,
+            "recommended_action": self.recommended_action,
             "seed_memory_ids": self.seed_memory_ids,
             "member_ids": self.member_ids,
             "members": [member.to_dict() for member in self.members],
@@ -257,8 +261,8 @@ class ConsolidationCluster:
     ) -> dict[str, object]:
         return {
             "group_id": self.cluster_id,
-            "reason": "embedding_similarity_cluster",
-            "recommended_action": "merge_or_delete_if_not_independently_useful",
+            "reason": self.reason,
+            "recommended_action": self.recommended_action,
             "member_count": len(self.member_ids),
             "member_ids": self.member_ids,
             "members": [
@@ -433,7 +437,7 @@ class ConsolidationReport:
             "generated_at": self.generated_at,
             "candidate_counts": self.candidate_counts(),
             "unretrieved_policy": {
-                "minimum_queries_since_created": 100,
+                "minimum_queries_since_created": 1000,
                 "description": (
                     "Only memories with access_count=0 and at least this many later "
                     "recall queries are surfaced. The count intentionally includes "

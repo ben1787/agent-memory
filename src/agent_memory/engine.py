@@ -1506,7 +1506,7 @@ class AgentMemory:
 
     def _unretrieved_memory_candidates(self) -> list[ConsolidationUnretrievedCandidate]:
         query_timestamps = self._query_timestamps()
-        if len(query_timestamps) < 100:
+        if len(query_timestamps) < 1000:
             return []
         candidates: list[ConsolidationUnretrievedCandidate] = []
         for memory in self._memories:
@@ -1518,7 +1518,7 @@ class AgentMemory:
             queries_since_created = sum(
                 1 for timestamp in query_timestamps if timestamp > created_at
             )
-            if queries_since_created < 100:
+            if queries_since_created < 1000:
                 continue
             member = ConsolidationClusterMember(
                 memory_id=memory.id,

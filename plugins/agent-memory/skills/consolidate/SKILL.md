@@ -29,7 +29,7 @@ Rules:
 - The report has only similarity clusters, standalone metadata tag cleanup, repeatedly negative-rated memories, and sufficiently tried-but-unretrieved memories.
 - To inspect one candidate, run `agent-memory consolidate --json --group <group_id>`.
 - To inspect a specific memory body, run `agent-memory show <memory_id> --json`.
-- `clusters` groups memories whose cosine similarity is at least `0.8`.
+- `clusters` groups memories whose cosine similarity is at least `0.85`.
 - Clusters may overlap. Do not assume they are a partition of the memory store.
 - `metadata_cleanup` surfaces similar standalone tag values only; do not assume memory-level redundancy from tag cleanup.
 - `negative_feedback_memories` surfaces memories with more than three negative per-memory ratings and zero positive ratings. Editing such a memory resets its prior feedback.
